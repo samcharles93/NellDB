@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"syscall/js"
 
 	"github.com/samcharles93/NellDB"
@@ -12,8 +13,8 @@ import (
 )
 
 var (
-	store = nell.NewMemoryStore("wasm-client")
-	db    = sdk.New(store, "wasm-client")
+	store nell.Store
+	db    *sdk.DocDB
 	ctx   = context.Background()
 )
 
@@ -135,6 +136,15 @@ func errorJSON(msg string) string {
 
 func main() {
 	ch := make(chan struct{}, 0)
+
+	var err error
+	store, err = nell.NewIndexedDBStore("wasm-client")
+	if err != nil {
+		fmt.Println("Falling back to MemoryStore:", err)
+		store = nell.NewMemoryStore("wasm-client")
+	}
+	db = sdk.New(store, "wasm-client")
+
 	registerCallbacks()
 	<-ch
 }
