@@ -7,11 +7,11 @@
   - `go test ./sdk -run '^TestReplicatorRoundtrip$'`
   - `go test ./server -run '^TestServerPushThenPull$'`
 - Run the WASM integration coverage with `make test-wasm`. That host-side test builds `client/main.go` for `js/wasm` and executes it under Node, so it exercises the real exported callbacks instead of a native substitute.
-- Run static analysis with `go vet ./...`. The repo treats this as part of normal validation (`cmd/nell-server/build_test.go` checks it).
+- Run static analysis with `go vet ./...`. The repo treats this as part of normal validation (`cmd/nelldb-server/build_test.go` checks it).
 - Run lint-style checks with `staticcheck ./...`.
-- Build the standalone server with `make build-server` or `go build -o bin/nell-server ./cmd/nell-server/`.
+- Build the standalone server with `make build-server` or `go build -o bin/nelldb-server ./cmd/nelldb-server/`.
 - Build the WASM bundle with `make build-wasm`.
-- `go generate ./client/...` is also a real build path here: it produces `client/nell.wasm` and `client/wasm_exec.js`, and `cmd/nell-server/build_test.go` checks that the generate directives stay valid.
+- `go generate ./client/...` is also a real build path here: it produces `client/nell.wasm` and `client/wasm_exec.js`, and `cmd/nelldb-server/build_test.go` checks that the generate directives stay valid.
 
 ## High-level architecture
 
@@ -24,7 +24,7 @@
   - `/sync/check` is the anti-entropy endpoint driven by `KnowledgeVector`
 - `sdk.Replicator` is the important replication path for Go clients. Its pull path uses `/sync/check`, not `/sync/pull`, so per-peer knowledge vectors survive concurrent writes from different nodes. `MeshManager` in `server/peer.go` uses the same endpoint for periodic server-to-server reconciliation.
 - `client/` is the WASM + JS bridge. `client/main.go` exposes global JS callbacks (`nellPut`, `nellGet`, `nellDelete`, `nellList`) backed by a `MemoryStore`; `client/nell.js` is a thin wrapper around those callbacks. This side is simpler than the Go SDK and still has TODOs around full sync behavior.
-- `cmd/nell-server/` is only the CLI wiring: flags choose `MemoryStore` vs `logstore`, then wrap it in `server.New(...)` and optionally start the peer mesh loop.
+- `cmd/nelldb-server/` is only the CLI wiring: flags choose `MemoryStore` vs `logstore`, then wrap it in `server.New(...)` and optionally start the peer mesh loop.
 - `examples/example.go` is the fastest end-to-end orientation for the Go SDK: local CRUD, `_rev` conflicts, `AllDocs`, changes feeds, and replication against a running server.
 
 ## Key conventions

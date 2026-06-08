@@ -439,7 +439,7 @@ Combined with the hand-written `nell.js`, this forms the complete client SDK bun
 
 ```makefile
 build-wasm:   go generate ./client/...      # → client/nell.wasm + wasm_exec.js
-build-server: go build -o bin/nell-server server/main.go
+build-server: go build -o bin/nelldb-server server/main.go
 build-all:    build-wasm build-server
 ```
 
@@ -483,7 +483,7 @@ NellDB/
 │   ├── vector.go        # Persisted meta:vector (KnowledgeVector on disk)
 │   ├── rev.go           # _rev generation (gen-sha1 tokens)
 │   └── changes.go       # Changes feed hub
-├── cmd/nell-server/
+├── cmd/nelldb-server/
 │   └── main.go          # Server CLI entrypoint
 ├── examples/
 │   └── example.go       # Runnable tour of the SDK

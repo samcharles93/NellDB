@@ -47,13 +47,13 @@ Frame format: `[uncompressed_len u32][compressed_len u32][Zstd data]`
 | `/sync/push` | POST | Client sends `{changes: [Record]}`, server applies via LWW and broadcasts to peers. |
 | `/sync/check` | POST | Peer sends `{sender_node_id, vector: KnowledgeVector}`, server returns records the peer is missing. Anti-entropy. |
 
-Server can be embedded as a library (`server.New(store, nodeID)`) or run standalone via `cmd/nell-server`.
+Server can be embedded as a library (`server.New(store, nodeID)`) or run standalone via `cmd/nelldb-server`.
 
-### CLI (`cmd/nell-server/`)
+### CLI (`cmd/nelldb-server/`)
 
 ```bash
-nell-server --addr :8080 --node-id my-server --data nell.db
-nell-server --in-memory  # ephemeral mode for testing
+nelldb-server --addr :8080 --node-id my-server --data nell.db
+nelldb-server --in-memory  # ephemeral mode for testing
 ```
 
 ### WASM Client + JS SDK (`client/`)
@@ -140,8 +140,8 @@ That's it. One external dependency. Everything else is the Go standard library.
 
 ```bash
 # Build and run the server
-go build -o nell-server ./cmd/nell-server/
-./nell-server --data my-data.db
+go build -o nelldb-server ./cmd/nelldb-server/
+./nelldb-server --data my-data.db
 
 # Push a record
 curl -X POST http://localhost:8080/sync/push \

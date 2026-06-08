@@ -25,3 +25,9 @@ coverage/
 .idea/
 *.swp
 *.swo
+
+# ── Binaries ────────────────────────────────────────────────────────────────
+nell-server
+nelldb-server
+*.wasm
+client/wasm_exec.js

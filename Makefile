@@ -7,7 +7,7 @@ build-wasm:
 
 build-server:
 	@echo "Building native server..."
-	go build -o bin/nell-server ./cmd/nell-server/
+	go build -o bin/nelldb-server ./cmd/nelldb-server/
 
 test-wasm:
 	@echo "Running WASM integration tests..."

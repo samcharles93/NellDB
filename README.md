@@ -99,7 +99,7 @@ The wire format is JSON over HTTP. The SDK writes `_rev` into the document body 
 └─────────────────────────────────────────────────────────────┘
 ```
 
-A single Go codebase. The native `nell-server` binary is `cmd/nell-server`. The WASM build is `client/`. Everything else is importable as a library.
+A single Go codebase. The native `nelldb-server` binary is `cmd/nelldb-server`. The WASM build is `client/`. Everything else is importable as a library.
 
 ## When to use NellDB
 
@@ -133,7 +133,7 @@ NellDB/
 ├── server/               package server   ← HTTP sync, anti-entropy
 ├── sdk/                  package sdk      ← DocDB, Replicator
 ├── client/               package client   ← WASM runtime + JS SDK
-├── cmd/nell-server/      package main     ← standalone binary
+├── cmd/nelldb-server/      package main     ← standalone binary
 ├── examples/                              ← runnable tour
 ├── docs/                                  ← status, design, ADRs
 └── scripts/                                ← build helpers

@@ -1,5 +1,5 @@
 // Command example is a runnable tour of the Nell SDK.  It exercises every
-// public method on DocDB against an in-process nell-server so you can read
+// public method on DocDB against an in-process nelldb-server so you can read
 // the code top-to-bottom and see how the pieces fit together.
 //
 // Usage:
@@ -7,7 +7,7 @@
 //	# In-memory only (no server):
 //	go run ./examples/
 //
-//	# Against a real nell-server (must be running on :9342):
+//	# Against a real nelldb-server (must be running on :9342):
 //	go run ./examples/ --server http://localhost:9342
 package main
 
@@ -27,7 +27,7 @@ import (
 )
 
 func main() {
-	serverURL := flag.String("server", "", "base URL of a nell-server to replicate against (default: in-memory only)")
+	serverURL := flag.String("server", "", "base URL of a nelldb-server to replicate against (default: in-memory only)")
 	flag.Parse()
 
 	ctx, cancel := context.WithCancel(context.Background())
