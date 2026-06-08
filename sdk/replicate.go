@@ -11,10 +11,10 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/samcharles93/nell-engine"
+	"github.com/samcharles93/NellDB"
 )
 
-// Replicator pulls and pushes between this database and a remote nell-engine
+// Replicator pulls and pushes between this database and a remote NellDB
 // HTTP server.  The wire protocol is the existing /sync/pull and /sync/push
 // endpoints — no server changes required.
 //

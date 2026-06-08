@@ -1,4 +1,4 @@
-module github.com/samcharles93/nell-engine
+module github.com/samcharles93/NellDB
 
 go 1.26.3
 

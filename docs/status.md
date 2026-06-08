@@ -1,21 +1,21 @@
 # NellDB — Project Status
 
-NellDB is a distributed, real-time, document-oriented database. JSON-native, HTTP-synced, embeddable as a Go library or a JavaScript client. The Go module is `github.com/samcharles93/nell-engine`.
+NellDB is a distributed, real-time, document-oriented database. JSON-native, HTTP-synced, embeddable as a Go library or a JavaScript client. The Go module is `github.com/samcharles93/NellDB`.
 
 ## Package layout
 
 ```
-github.com/samcharles93/nell-engine          → package nell    (core types, Store interface, MemoryStore, LWW)
-github.com/samcharles93/nell-engine/logstore  → package logstore (persistent Zstd-compressed store)
-github.com/samcharles93/nell-engine/server    → package server   (HTTP sync, anti-entropy)
-github.com/samcharles93/nell-engine/sdk       → package sdk      (document API + Replicator)
-github.com/samcharles93/nell-engine/client    → package client   (WASM runtime + JS SDK, build: js && wasm)
+github.com/samcharles93/NellDB          → package nell    (core types, Store interface, MemoryStore, LWW)
+github.com/samcharles93/NellDB/logstore  → package logstore (persistent Zstd-compressed store)
+github.com/samcharles93/NellDB/server    → package server   (HTTP sync, anti-entropy)
+github.com/samcharles93/NellDB/sdk       → package sdk      (document API + Replicator)
+github.com/samcharles93/NellDB/client    → package client   (WASM runtime + JS SDK, build: js && wasm)
 ```
 
-The product is **NellDB**.  The Go module path (`nell-engine`) is the
+The product is **NellDB**.  The Go module path (`NellDB`) is the
 repository name and is what you import; the package names are the short
-forms listed above.  `import "github.com/samcharles93/nell-engine"` gives
-you the engine; `import "github.com/samcharles93/nell-engine/sdk"` gives
+forms listed above.  `import "github.com/samcharles93/NellDB"` gives
+you the engine; `import "github.com/samcharles93/NellDB/sdk"` gives
 you the document API.
 
 ## What Was Built

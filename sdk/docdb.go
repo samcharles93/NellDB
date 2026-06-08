@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/samcharles93/nell-engine"
+	"github.com/samcharles93/NellDB"
 )
 
 // DocDB is a document database backed by any nell.Store.  It is safe for

@@ -1,4 +1,4 @@
-# Copilot instructions for `nell-engine`
+# Copilot instructions for `NellDB`
 
 ## Build, test, and validation
 

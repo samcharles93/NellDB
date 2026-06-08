@@ -1,4 +1,4 @@
-// Package store provides persistent backends for the nell-engine nell.Store
+// Package store provides persistent backends for the NellDB nell.Store
 // interface.
 package logstore
 
@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
-	"github.com/samcharles93/nell-engine"
+	"github.com/samcharles93/NellDB"
 )
 
 // ── Frame format ──────────────────────────────────────────────────────────────

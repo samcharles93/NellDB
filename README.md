@@ -14,7 +14,7 @@ NellDB is a distributed, real-time, document-oriented database. JSON-native, HTT
 ## Install
 
 ```bash
-go get github.com/samcharles93/nell-engine
+go get github.com/samcharles93/NellDB
 ```
 
 ```js
@@ -30,8 +30,8 @@ import (
     "context"
     "fmt"
 
-    "github.com/samcharles93/nell-engine"
-    "github.com/samcharles93/nell-engine/sdk"
+    "github.com/samcharles93/NellDB"
+    "github.com/samcharles93/NellDB/sdk"
 )
 
 func main() {
@@ -126,7 +126,7 @@ A single Go codebase. The native `nell-server` binary is `cmd/nell-server`. The 
 ## Repo layout
 
 ```
-nell-engine/
+NellDB/
 ├── types.go              package nell     ← core types, Store, MemoryStore, LWW
 ├── store.go              package nell
 ├── logstore/             package logstore ← persistent Zstd log

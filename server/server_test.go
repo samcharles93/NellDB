@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samcharles93/nell-engine"
+	"github.com/samcharles93/NellDB"
 )
 
 func newTestServer(t *testing.T) (*Server, *httptest.Server) {

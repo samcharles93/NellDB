@@ -80,7 +80,7 @@ func (a HLC) String() string {
 
 // ── Record ────────────────────────────────────────────────────────────────────
 
-// Record is the universal document type carried by nell-engine.  Text and image
+// Record is the universal document type carried by NellDB.  Text and image
 // payloads live in Payload; vector embeddings live in Vector.  The Clock field
 // provides causal ordering; UpdatedBy identifies the originating node.
 type Record struct {

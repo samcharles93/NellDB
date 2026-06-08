@@ -1,6 +1,6 @@
 // Package server provides the HTTP API, WebSocket fan-out, and peer
-// replication for nell-engine.  It can be embedded in any Go application
-// (standalone mode) or connected to other nell-engine instances (mesh mode).
+// replication for NellDB.  It can be embedded in any Go application
+// (standalone mode) or connected to other NellDB instances (mesh mode).
 package server
 
 import (
@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/samcharles93/nell-engine"
+	"github.com/samcharles93/NellDB"
 )
 
 // MaxBodyBytes is the maximum request body size accepted by sync endpoints.
@@ -94,7 +94,7 @@ func requireJSON(next http.Handler) http.Handler {
 
 // ListenAndServe starts the server on the given address.
 func (s *Server) ListenAndServe(addr string) error {
-	slog.Info("nell-engine server listening", "node", s.nodeID, "addr", addr)
+	slog.Info("NellDB server listening", "node", s.nodeID, "addr", addr)
 	return http.ListenAndServe(addr, s.Handler())
 }
 

@@ -1,4 +1,4 @@
-// Package server — OpenTelemetry metrics for the nell-engine sync server.
+// Package server — OpenTelemetry metrics for the NellDB sync server.
 //
 // Exposes a /metrics endpoint via the Prometheus exporter.  Counters track
 // request volume by endpoint, records accepted/rejected, and HTTP status
@@ -48,7 +48,7 @@ func NewMetrics() (*Metrics, error) {
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(exporter))
 	otel.SetMeterProvider(provider)
 
-	meter := provider.Meter("nell-engine")
+	meter := provider.Meter("NellDB")
 
 	m := &Metrics{meter: meter, provider: provider}
 

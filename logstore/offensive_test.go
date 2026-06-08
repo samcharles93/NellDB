@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/samcharles93/nell-engine"
+	"github.com/samcharles93/NellDB"
 )
 
 // ── Corrupted data ───────────────────────────────────────────────────────────

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"maps"
 
-	"github.com/samcharles93/nell-engine"
+	"github.com/samcharles93/NellDB"
 )
 
 // metaVectorID is the synthetic _id the SDK uses to persist its replication

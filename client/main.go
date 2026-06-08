@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"syscall/js"
 
-	"github.com/samcharles93/nell-engine"
-	"github.com/samcharles93/nell-engine/sdk"
+	"github.com/samcharles93/NellDB"
+	"github.com/samcharles93/NellDB/sdk"
 )
 
 var (

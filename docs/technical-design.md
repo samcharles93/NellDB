@@ -132,7 +132,7 @@ Everything above this interface — the sync engine, conflict resolver, HTTP han
 ### 4.4 IndexedDB Layout (IndexedDBStore)
 
 ```
-Database: nell-engine
+Database: NellDB
   ObjectStore: records (keyPath: id)
     Index: clock (on record.clock.wall_time, non-unique)
   ObjectStore: outbox (keyPath: autoincrement)
@@ -455,7 +455,7 @@ client/
 
 The Go server is a library:
 ```go
-import "github.com/samcharles93/nell-engine/server"
+import "github.com/samcharles93/NellDB/server"
 ```
 
 ---
@@ -463,7 +463,7 @@ import "github.com/samcharles93/nell-engine/server"
 ## 14. Project Directory Structure
 
 ```
-nell-engine/
+NellDB/
 ├── types.go             # package nell — Record, HLC, DataType
 ├── store.go             # package nell — Store interface, MemoryStore, ResolveConflict, KnowledgeVector
 ├── logstore/

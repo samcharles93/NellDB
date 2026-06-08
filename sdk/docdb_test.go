@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samcharles93/nell-engine"
-	"github.com/samcharles93/nell-engine/server"
+	"github.com/samcharles93/NellDB"
+	"github.com/samcharles93/NellDB/server"
 )
 
 // ── CRUD ─────────────────────────────────────────────────────────────────────
