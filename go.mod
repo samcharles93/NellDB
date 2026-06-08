@@ -3,6 +3,7 @@ module github.com/samcharles93/NellDB
 go 1.26.3
 
 require (
+	github.com/gorilla/websocket v1.5.3
 	github.com/klauspost/compress v1.18.6
 	github.com/prometheus/client_golang v1.23.2
 	go.opentelemetry.io/otel v1.44.0

@@ -147,9 +147,9 @@ func (pm *MeshManager) Stop() {
 
 // ── PeerManager interface implementation ─────────────────────────────────
 
-// BroadcastMutation stubs the WebSocket push path.
+// BroadcastMutation pushes a local mutation to all connected WebSocket peers.
 func (pm *MeshManager) BroadcastMutation(rec nell.Record) {
-	_ = rec // TODO: WebSocket fan-out
+	pm.srv.broadcast([]nell.Record{rec})
 }
 
 // ReconcileWithPeer performs a one-shot /sync/check → ingest cycle with peerURL.

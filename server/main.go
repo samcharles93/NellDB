@@ -10,8 +10,13 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/gorilla/websocket"
 	"github.com/samcharles93/NellDB"
 )
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
 
 // MaxBodyBytes is the maximum request body size accepted by sync endpoints.
 // Incoming JSON larger than this limit is rejected with 413 Request Entity Too Large.
@@ -73,6 +78,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/sync/pull", s.handlePull)
 	mux.HandleFunc("/sync/push", s.handlePush)
 	mux.HandleFunc("/sync/check", s.handleCheck)
+	mux.HandleFunc("/sync/ws", s.handleWebSocket)
 	return requireJSON(mux)
 }
 
@@ -260,7 +266,68 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 
 type peerConn struct {
 	nodeID string
-	// TODO: WebSocket connection for real-time push
+	mu     sync.Mutex
+	conn   *websocket.Conn
+}
+
+// handleWebSocket upgrades the HTTP connection to a WebSocket for real-time
+// replication and listens for incoming changes.
+func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		slog.Error("websocket upgrade failed", "err", err)
+		return
+	}
+
+	nodeID := r.URL.Query().Get("node_id")
+	if nodeID == "" {
+		nodeID = "unknown"
+	}
+
+	p := &peerConn{
+		nodeID: nodeID,
+		conn:   conn,
+	}
+
+	remoteAddr := r.RemoteAddr
+	s.mu.Lock()
+	s.peers[remoteAddr] = p
+	s.mu.Unlock()
+
+	go func() {
+		defer func() {
+			s.mu.Lock()
+			delete(s.peers, remoteAddr)
+			s.mu.Unlock()
+			conn.Close()
+		}()
+
+		for {
+			var req struct {
+				Changes []nell.Record `json:"changes"`
+			}
+			if err := conn.ReadJSON(&req); err != nil {
+				break
+			}
+
+			accepted := 0
+			for _, rec := range req.Changes {
+				ok, _, err := s.store.Put(rec)
+				if err != nil {
+					slog.Error("websocket store put error", "err", err)
+					continue
+				}
+				if ok {
+					accepted++
+				}
+				s.recordSeen(rec)
+			}
+
+			if accepted > 0 {
+				s.broadcast(req.Changes)
+			}
+		}
+	}()
 }
 
 // recordSeen updates the local knowledge vector with a record we've ingested.
@@ -276,8 +343,15 @@ func (s *Server) broadcast(changes []nell.Record) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, p := range s.peers {
-		_ = p // TODO: WebSocket send
-		slog.Info("[broadcast] records", "peer", p.nodeID, "count", len(changes))
+		go func(p *peerConn) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if err := p.conn.WriteJSON(map[string]any{"changes": changes}); err != nil {
+				slog.Error("websocket broadcast failed", "peer", p.nodeID, "err", err)
+			} else {
+				slog.Info("[broadcast] records", "peer", p.nodeID, "count", len(changes))
+			}
+		}(p)
 	}
 }
 
