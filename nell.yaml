@@ -1,0 +1,21 @@
+server:
+  port: 9342
+  data_dir: "."
+  max_skew_ms: 500
+web:
+  enabled: true
+auth:
+  jwks_url: "https://auth.example.com/.well-known/jwks.json"
+  jwks_refresh_interval_seconds: 3600
+sync:
+  max_batch_size: 1000
+  staleness_eviction_days: 14
+compaction:
+  interval_minutes: 60
+vector:
+  enable_hnsw: true
+  pca_dimensions: 128
+  training_sample_size: 5000
+  retraining_insert_threshold: 50000
+  pq_subspaces: 16
+  pq_centroids: 256
