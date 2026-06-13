@@ -52,7 +52,7 @@ Server can be embedded as a library (`server.New(store, nodeID)`) or run standal
 ### CLI (`cmd/nelldb-server/`)
 
 ```bash
-nelldb-server --addr :8080 --node-id my-server --data nell.db
+nelldb-server --addr :9342 --node-id my-server --data nell.db
 nelldb-server --in-memory  # ephemeral mode for testing
 ```
 
@@ -144,11 +144,11 @@ go build -o nelldb-server ./cmd/nelldb-server/
 ./nelldb-server --data my-data.db
 
 # Push a record
-curl -X POST http://localhost:8080/sync/push \
+curl -X POST http://localhost:9342/sync/push \
   -d '{"changes":[{"id":"hello","type":"text","payload":"d29ybGQ=","clock":{"wall_time":1,"counter":0},"updated_by":"cli"}]}'
 
 # Pull all records
-curl -X POST http://localhost:8080/sync/pull \
+curl -X POST http://localhost:9342/sync/pull \
   -d '{"since":{"wall_time":0,"counter":0}}'
 
 # Build WASM client
