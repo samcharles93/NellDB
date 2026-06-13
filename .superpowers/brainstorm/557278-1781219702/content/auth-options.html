@@ -1,0 +1,44 @@
+<h2>Auth & Multi-tenancy</h2>
+<p class="subtitle">How should we scope access to your data?</p>
+
+<div class="section">
+  <p>Now that we have <strong>Collections</strong>, we can think about how to secure them. Nell is a peer-to-peer system, so auth happens at the sync layer.</p>
+</div>
+
+<div class="options" data-multiselect>
+  <div class="option" data-choice="token" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Global Bearer Token</h3>
+      <p>Simple static token for the whole server. Good for private meshes.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="per-col" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Per-Collection Keys</h3>
+      <p>Each collection has its own read/write key. Allows scoping sync to specific datasets.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="oidc" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>OIDC / JWT</h3>
+      <p>Integrate with external auth providers. Better for multi-user apps.</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="mockup">
+    <div class="mockup-header">Sync Request Example</div>
+    <div class="mockup-body">
+<pre><code>POST /sync/pull?col=messages
+Authorization: Bearer <span class="label">your-token</span>
+
+{
+  "since": "1781219702:0"
+}</code></pre>
+    </div>
+  </div>
+</div>

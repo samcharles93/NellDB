@@ -1,0 +1,65 @@
+<h2>Binary Wire Protocol</h2>
+<p class="subtitle">Reducing bandwidth for vectors and image payloads</p>
+
+<div class="section">
+  <p>JSON is currently our only wire format. It's readable, but it's 2-3x larger than binary and requires expensive Base64 encoding for <code>[]byte</code> and <code>[]float32</code> fields.</p>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="cbor" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>CBOR (Concise Binary Object Representation)</h3>
+      <p><strong>Binary JSON.</strong> Easiest to implement. No schema files required. Native support for byte arrays. Great balance of speed and simplicity.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="protobuf" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Protobuf</h3>
+      <p><strong>The Industry Standard.</strong> Smallest payloads and fastest parsing. Requires <code>.proto</code> files and code generation. Very strict, which is good for stability.</p>
+    </div>
+  </div>
+  <div class="option" data-choice="custom" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Custom Flat-Buffer</h3>
+      <p><strong>Zero-copy performance.</strong> Best for WASM/Go interaction. We define a fixed-width header (8-byte HLC, etc.) and append the payload. Hardest to maintain but fastest possible sync.</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="mockup">
+    <div class="mockup-header">Payload Size Comparison (Vector Sync)</div>
+    <div class="mockup-body">
+      <table style="width:100%; border-collapse: collapse;">
+        <thead>
+          <tr style="border-bottom: 1px solid var(--border);">
+            <th align="left">Format</th>
+            <th align="left">Size</th>
+            <th align="left">CPU Overhead</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>JSON (Current)</td>
+            <td>~1.2 KB</td>
+            <td>High (Base64 + Parse)</td>
+          </tr>
+          <tr>
+            <td>CBOR</td>
+            <td>~500 B</td>
+            <td>Low</td>
+          </tr>
+          <tr>
+            <td>Protobuf</td>
+            <td>~420 B</td>
+            <td>Minimal</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="subtitle" style="margin-top:10px;">*Example: 10 records with 128-dim vectors</p>
+    </div>
+  </div>
+</div>

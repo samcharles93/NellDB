@@ -1,0 +1,46 @@
+<h2>Security Rules Architecture</h2>
+<p class="subtitle">Adopting a Firestore-style declarative model</p>
+
+<div class="section">
+  <p>To support <strong>Document -> Collection -> Global</strong> rules without reinventing the wheel, we can use a declarative approach. Here are three ways to implement it in Go.</p>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="cel" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>CEL (Common Expression Language)</h3>
+      <p>The industry standard (used by Firestore/Envoy). Use <code>google/cel-go</code> to evaluate rules. Very powerful, supports complex logic on <code>request</code> and <code>resource</code>.</p>
+      <pre><code>allow write: if request.auth.uid == resource.data.ownerId;</code></pre>
+    </div>
+  </div>
+  <div class="option" data-choice="simple-json" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Simplified JSON/YAML Rules</h3>
+      <p>Easier to parse and ship in a tiny binary. Map-based lookups with basic operators (<code>==</code>, <code>in</code>, <code>exists</code>).</p>
+      <pre><code>rules:
+  collections:
+    messages:
+      write: "auth.uid == data.sender"</code></pre>
+    </div>
+  </div>
+  <div class="option" data-choice="middleware-hooks" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Go Plugin / Middleware Hooks</h3>
+      <p>Define rules as Go functions. Maximum performance, but requires re-compiling or using Go plugins. Hardest to sync across a distributed mesh.</p>
+    </div>
+  </div>
+</div>
+
+<div class="pros-cons">
+  <div class="pros">
+    <h4>Why Firestore-style (CEL) Wins</h4>
+    <ul>
+      <li><strong>Familiarity:</strong> Devs already know the syntax.</li>
+      <li><strong>Security:</strong> CEL is non-Turing complete (won't hang your server).</li>
+      <li><strong>Portability:</strong> Rules can be synced between Go server and WASM client.</li>
+    </ul>
+  </div>
+</div>
