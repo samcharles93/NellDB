@@ -15,7 +15,7 @@ import (
 // ── CRUD ─────────────────────────────────────────────────────────────────────
 
 func TestPutGetRoundtrip(t *testing.T) {
-	db := New(nell.NewMemoryStore("n"), "n")
+	db := New(nell.NewMemoryStore("n"), "n", nell.DefaultCollection)
 	ctx := context.Background()
 
 	rev, err := db.Put(ctx, Doc{FieldID: "note:1", "title": "Hello"})
@@ -39,7 +39,7 @@ func TestPutGetRoundtrip(t *testing.T) {
 }
 
 func TestPutConflict(t *testing.T) {
-	db := New(nell.NewMemoryStore("n"), "n")
+	db := New(nell.NewMemoryStore("n"), "n", nell.DefaultCollection)
 	ctx := context.Background()
 
 	rev1, _ := db.Put(ctx, Doc{FieldID: "x", "v": 1})
@@ -52,7 +52,7 @@ func TestPutConflict(t *testing.T) {
 }
 
 func TestGetMissing(t *testing.T) {
-	db := New(nell.NewMemoryStore("n"), "n")
+	db := New(nell.NewMemoryStore("n"), "n", nell.DefaultCollection)
 	_, err := db.Get(context.Background(), "nope")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
@@ -62,7 +62,7 @@ func TestGetMissing(t *testing.T) {
 func TestRevMonotonicAndContentHash(t *testing.T) {
 	// Local writes without explicit _rev must continue the chain.  This is
 	// the read-modify-write contract callers rely on.
-	db := New(nell.NewMemoryStore("n"), "n")
+	db := New(nell.NewMemoryStore("n"), "n", nell.DefaultCollection)
 	ctx := context.Background()
 
 	r1, _ := db.Put(ctx, Doc{FieldID: "x", "v": 1})
@@ -87,7 +87,7 @@ func TestRevMonotonicAndContentHash(t *testing.T) {
 func TestRevIdenticalBodyStillIncrements(t *testing.T) {
 	// Identical bodies, no explicit _rev — revs must still tick (gen
 	// increments) so the change feed can detect "this is a new write".
-	db := New(nell.NewMemoryStore("n"), "n")
+	db := New(nell.NewMemoryStore("n"), "n", nell.DefaultCollection)
 	ctx := context.Background()
 
 	r1, _ := db.Put(ctx, Doc{FieldID: "x", "v": 1})
@@ -102,7 +102,7 @@ func TestRevIdenticalBodyStillIncrements(t *testing.T) {
 }
 
 func TestRemoveTombstone(t *testing.T) {
-	db := New(nell.NewMemoryStore("n"), "n")
+	db := New(nell.NewMemoryStore("n"), "n", nell.DefaultCollection)
 	ctx := context.Background()
 
 	_, _ = db.Put(ctx, Doc{FieldID: "x", "v": 1})
@@ -126,7 +126,7 @@ func TestRemoveTombstone(t *testing.T) {
 }
 
 func TestRemoveWithRevConflict(t *testing.T) {
-	db := New(nell.NewMemoryStore("n"), "n")
+	db := New(nell.NewMemoryStore("n"), "n", nell.DefaultCollection)
 	ctx := context.Background()
 
 	rev1, _ := db.Put(ctx, Doc{FieldID: "x", "v": 1})
@@ -141,7 +141,7 @@ func TestRemoveWithRevConflict(t *testing.T) {
 // ── Bulk ─────────────────────────────────────────────────────────────────────
 
 func TestPutManyAllOrNothing(t *testing.T) {
-	db := New(nell.NewMemoryStore("n"), "n")
+	db := New(nell.NewMemoryStore("n"), "n", nell.DefaultCollection)
 	ctx := context.Background()
 
 	docs := []Doc{
@@ -171,7 +171,7 @@ func TestPutManyAllOrNothing(t *testing.T) {
 }
 
 func TestGetMany(t *testing.T) {
-	db := New(nell.NewMemoryStore("n"), "n")
+	db := New(nell.NewMemoryStore("n"), "n", nell.DefaultCollection)
 	ctx := context.Background()
 	_, _ = db.Put(ctx, Doc{FieldID: "a", "v": 1})
 	_, _ = db.Put(ctx, Doc{FieldID: "b", "v": 2})
@@ -191,7 +191,7 @@ func TestGetMany(t *testing.T) {
 // ── AllDocs ──────────────────────────────────────────────────────────────────
 
 func TestAllDocsRange(t *testing.T) {
-	db := New(nell.NewMemoryStore("n"), "n")
+	db := New(nell.NewMemoryStore("n"), "n", nell.DefaultCollection)
 	ctx := context.Background()
 	for _, id := range []string{"m:1", "m:2", "m:3", "c:1", "c:2"} {
 		if _, err := db.Put(ctx, Doc{FieldID: id, "data": id}); err != nil {
@@ -216,7 +216,7 @@ func TestAllDocsRange(t *testing.T) {
 }
 
 func TestAllDocsByKeys(t *testing.T) {
-	db := New(nell.NewMemoryStore("n"), "n")
+	db := New(nell.NewMemoryStore("n"), "n", nell.DefaultCollection)
 	ctx := context.Background()
 	for _, id := range []string{"a", "b", "c"} {
 		_, _ = db.Put(ctx, Doc{FieldID: id})
@@ -236,7 +236,7 @@ func TestAllDocsByKeys(t *testing.T) {
 // ── Changes feed ─────────────────────────────────────────────────────────────
 
 func TestChangesFeed(t *testing.T) {
-	db := New(nell.NewMemoryStore("n"), "n")
+	db := New(nell.NewMemoryStore("n"), "n", nell.DefaultCollection)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -272,7 +272,7 @@ func TestChangesFeedIncludesRemote(t *testing.T) {
 	// Replicated changes must surface on the local feed.  This is the live
 	// update path — without it, the UI has to poll db.Changes() to know
 	// when peers have written.
-	dbB := New(nell.NewMemoryStore("b"), "b")
+	dbB := New(nell.NewMemoryStore("b"), "b", nell.DefaultCollection)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ch := dbB.Changes(ctx)
@@ -326,7 +326,7 @@ func TestReplicatorRoundtrip(t *testing.T) {
 	ts := newTestServer(storeA, "a")
 	defer ts.Close()
 
-	dbA := New(nell.NewMemoryStore("client"), "client")
+	dbA := New(nell.NewMemoryStore("client"), "client", nell.DefaultCollection)
 	rep := NewReplicator(dbA, ts.URL)
 	_, _ = dbA.Put(context.Background(), Doc{FieldID: "m:1", "title": "A"})
 	_, _ = dbA.Put(context.Background(), Doc{FieldID: "m:2", "title": "B"})
@@ -335,7 +335,7 @@ func TestReplicatorRoundtrip(t *testing.T) {
 		t.Fatalf("push: pushed=%d err=%v", pushed, err)
 	}
 
-	dbB := New(nell.NewMemoryStore("client2"), "client2")
+	dbB := New(nell.NewMemoryStore("client2"), "client2", nell.DefaultCollection)
 	repB := NewReplicator(dbB, ts.URL)
 	if pulled, err := repB.Pull(context.Background()); err != nil || pulled != 2 {
 		t.Fatalf("pull: pulled=%d err=%v", pulled, err)
@@ -362,7 +362,7 @@ func TestReplicatorIdempotentPull(t *testing.T) {
 	ts := newTestServer(storeA, "a")
 	defer ts.Close()
 
-	dbB := New(nell.NewMemoryStore("client"), "client")
+	dbB := New(nell.NewMemoryStore("client"), "client", nell.DefaultCollection)
 	_, _ = dbB.Put(context.Background(), Doc{FieldID: "m:1", "v": 1})
 
 	rep := NewReplicator(dbB, ts.URL)
@@ -406,7 +406,7 @@ func TestLastSeenClockPersistsAcrossRestart(t *testing.T) {
 	// First session: push to establish a clock.  The replicator writes
 	// meta:clock to the store as part of Pull.
 	clientStore := nell.NewMemoryStore("client")
-	db1 := New(clientStore, "client")
+	db1 := New(clientStore, "client", nell.DefaultCollection)
 	_, _ = db1.Put(context.Background(), Doc{FieldID: "m:1", "v": 1})
 	rep1 := NewReplicator(db1, ts.URL)
 	if _, err := rep1.Push(context.Background()); err != nil {
@@ -418,7 +418,7 @@ func TestLastSeenClockPersistsAcrossRestart(t *testing.T) {
 	}
 
 	// Second session: same store, new DocDB (simulates "reopened file").
-	db2 := New(clientStore, "client")
+	db2 := New(clientStore, "client", nell.DefaultCollection)
 
 	// db2 has the meta:clock record from session 1, so it should resume
 	// from that clock and pull nothing.
@@ -435,7 +435,7 @@ func TestReplicatorLivePicksUpNewRecords(t *testing.T) {
 	ts := newTestServer(storeA, "a")
 	defer ts.Close()
 
-	dbB := New(nell.NewMemoryStore("client"), "client")
+	dbB := New(nell.NewMemoryStore("client"), "client", nell.DefaultCollection)
 	rep := NewReplicator(dbB, ts.URL)
 
 	ctx := t.Context()
