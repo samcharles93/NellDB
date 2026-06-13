@@ -1,0 +1,6 @@
+{"time":"2026-06-13T02:14:31.429031564+10:00","level":"INFO","msg":"config loaded","path":"nell.yaml"}
+{"time":"2026-06-13T02:14:31.429104264+10:00","level":"INFO","msg":"using in-memory store"}
+{"time":"2026-06-13T02:14:31.429285282+10:00","level":"INFO","msg":"Web UI enabled","path":"/ui/"}
+{"time":"2026-06-13T02:14:31.429473115+10:00","level":"INFO","msg":"nell-server starting","node":"helix","addr":":9342","data":"./nell.db"}
+{"time":"2026-06-13T02:14:31.429664226+10:00","level":"ERROR","msg":"server error","err":"listen tcp :9342: bind: address already in use"}
+exit status 1
