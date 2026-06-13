@@ -3,7 +3,7 @@ package sdk
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"maps"
@@ -38,75 +38,89 @@ func NewReplicator(db *DocDB, baseURL string) *Replicator {
 	}
 }
 
-// Pull fetches every record the server has that we have not yet seen, based
-// on the SDK's persisted knowledge vector.  Returns the number ingested.
-//
-// The wire protocol is /sync/check (per-peer KV diff) rather than /sync/pull
-// (single-clock since).  /sync/check handles concurrent writes from new
-// peers whose clocks may match ours exactly — a case /sync/pull silently
-// drops because its GreaterThan is strict.
+// Pull fetches every record the server has that we have not yet seen,
+// using the high-performance binary protocol.
 func (r *Replicator) Pull(ctx context.Context) (int, error) {
 	r.DB.mu.RLock()
 	vector := make(nell.KnowledgeVector, len(r.DB.vector))
 	maps.Copy(vector, r.DB.vector)
 	r.DB.mu.RUnlock()
 
-	body, _ := json.Marshal(map[string]any{
-		"sender_node_id": r.DB.nodeID,
-		"vector":         vector,
-	})
+	body, err := vector.MarshalBinary()
+	if err != nil {
+		return 0, fmt.Errorf("replicate pull marshal: %w", err)
+	}
+
+	u, _ := url.Parse(joinPath(r.BaseURL, "/sync/bin/check"))
+	q := u.Query()
+	q.Set("col", r.DB.collection)
+	u.RawQuery = q.Encode()
+
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
-		joinPath(r.BaseURL, "/sync/check"), bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+		u.String(), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/octet-stream")
 
 	resp, err := r.HTTP.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("replicate pull: %w", err)
+		return 0, fmt.Errorf("replicate pull request: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
-		return 0, fmt.Errorf("replicate pull: %s: %s", resp.Status, raw)
+		msg, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("replicate pull server error (%d): %s",
+			resp.StatusCode, string(msg))
 	}
 
-	var out struct {
-		MissingChanges []nell.Record `json:"missing_changes"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return 0, fmt.Errorf("replicate pull decode: %w", err)
-	}
-	if out.MissingChanges == nil {
-		out.MissingChanges = []nell.Record{}
-	}
-
+	ingested := 0
 	var maxSeen nell.HLC
-	for _, rec := range out.MissingChanges {
+	for {
+		var header [4]byte
+		_, err := io.ReadFull(resp.Body, header[:])
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return ingested, fmt.Errorf("replicate pull read frame header: %w", err)
+		}
+
+		recLen := binary.BigEndian.Uint32(header[:])
+		recBytes := make([]byte, recLen)
+		if _, err := io.ReadFull(resp.Body, recBytes); err != nil {
+			return ingested, fmt.Errorf("replicate pull read frame data: %w", err)
+		}
+
+		var rec nell.Record
+		if err := rec.UnmarshalBinary(recBytes); err != nil {
+			return ingested, fmt.Errorf("replicate pull unmarshal record: %w", err)
+		}
+
 		if err := r.DB.ingestRemote(rec); err != nil {
-			return 0, fmt.Errorf("replicate pull ingest %q: %w", rec.ID, err)
+			return ingested, fmt.Errorf("replicate pull ingest %q: %w", rec.ID, err)
 		}
 		if rec.Clock.GreaterThan(maxSeen) {
 			maxSeen = rec.Clock
 		}
+		ingested++
 	}
+
 	if maxSeen.GreaterThan(nell.HLC{}) {
 		if err := r.DB.advanceClock(maxSeen); err != nil {
-			return len(out.MissingChanges), fmt.Errorf("replicate pull advance clock: %w", err)
+			return ingested, fmt.Errorf("replicate pull advance clock: %w", err)
 		}
 	}
-	return len(out.MissingChanges), nil
+
+	return ingested, nil
 }
 
-// Push sends every local record to the server.  Returns the number the server
-// accepted.
+// Push uploads all locally-held records the local node has in the
+// current collection, using the high-performance binary protocol.
 func (r *Replicator) Push(ctx context.Context) (int, error) {
-	all, err := r.DB.store.List()
+	all, err := r.DB.store.List(r.DB.collection)
 	if err != nil {
 		return 0, fmt.Errorf("replicate push list: %w", err)
 	}
-	// Filter out SDK-internal bookkeeping records (meta:clock,
-	// meta:vector).  They're local state and would otherwise be
-	// re-delivered by /sync/check, since they have UpdatedBy=local and a
-	// newer clock than the user's records.
+
 	filtered := all[:0]
 	for _, rec := range all {
 		if isInternalID(rec.ID) {
@@ -115,30 +129,47 @@ func (r *Replicator) Push(ctx context.Context) (int, error) {
 		filtered = append(filtered, rec)
 	}
 
-	body, _ := json.Marshal(map[string][]nell.Record{"changes": filtered})
+	// We stream the binary frames into a buffer for now.
+	var buf bytes.Buffer
+	for _, rec := range filtered {
+		recBytes, err := rec.MarshalBinary()
+		if err != nil {
+			continue
+		}
+		var header [4]byte
+		binary.BigEndian.PutUint32(header[:], uint32(len(recBytes)))
+		buf.Write(header[:])
+		buf.Write(recBytes)
+	}
+
+	u, _ := url.Parse(joinPath(r.BaseURL, "/sync/bin/push"))
+	q := u.Query()
+	q.Set("col", r.DB.collection)
+	u.RawQuery = q.Encode()
+
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
-		joinPath(r.BaseURL, "/sync/push"), bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+		u.String(), &buf)
+	req.Header.Set("Content-Type", "application/octet-stream")
 
 	resp, err := r.HTTP.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("replicate push: %w", err)
+		return 0, fmt.Errorf("replicate push request: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
-		return 0, fmt.Errorf("replicate push: %s: %s", resp.Status, raw)
+		msg, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("replicate push server error (%d): %s",
+			resp.StatusCode, string(msg))
 	}
 
-	var out struct {
-		Accepted int `json:"accepted"`
-		Total    int `json:"total"`
+	var respHeader [4]byte
+	if _, err := io.ReadFull(resp.Body, respHeader[:]); err != nil {
+		return 0, fmt.Errorf("replicate push read response: %w", err)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return 0, fmt.Errorf("replicate push decode: %w", err)
-	}
-	// After pushing, the server has seen our local records — the
-	// last-seen-clock should at least cover everything we sent.
+	accepted := int(binary.BigEndian.Uint32(respHeader[:]))
+
+	// After pushing, the server has seen our local records.
 	var maxSent nell.HLC
 	for _, rec := range filtered {
 		if rec.Clock.GreaterThan(maxSent) {
@@ -148,7 +179,8 @@ func (r *Replicator) Push(ctx context.Context) (int, error) {
 	if maxSent.GreaterThan(nell.HLC{}) {
 		_ = r.DB.advanceClock(maxSent)
 	}
-	return out.Accepted, nil
+
+	return accepted, nil
 }
 
 // Sync runs Push then Pull and returns (pushed, pulled, err).  One
@@ -261,7 +293,7 @@ func (d *DocDB) ingestRemote(rec nell.Record) error {
 	d.mu.Unlock()
 	d.observeVector(rec.UpdatedBy, rec.Clock)
 
-	doc := joinDoc(rec.ID, rec.Payload)
+	doc := joinDoc(rec.ID, rec)
 	if rec.Deleted {
 		doc[FieldDeleted] = true
 	}
