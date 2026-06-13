@@ -91,7 +91,7 @@ func TestLogStoreManyRecords(t *testing.T) {
 	ls2, _ := OpenLog(path, "node-a")
 	defer func() { _ = ls2.Close() }()
 
-	list, err := ls2.List()
+	list, err := ls2.List(nell.DefaultCollection)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestLogStoreManyOverwrites(t *testing.T) {
 	ls2, _ := OpenLog(path, "node-a")
 	defer func() { _ = ls2.Close() }()
 
-	list, _ := ls2.List()
+	list, _ := ls2.List(nell.DefaultCollection)
 	if len(list) != 1 {
 		t.Errorf("expected 1 record after 1000 overwrites, got %d", len(list))
 	}
@@ -185,7 +185,7 @@ func TestLogStoreConcurrentPuts(t *testing.T) {
 	}
 	wg.Wait()
 
-	list, _ := ls.List()
+	list, _ := ls.List(nell.DefaultCollection)
 	if len(list) != goroutines {
 		t.Errorf("expected %d records, got %d", goroutines, len(list))
 	}
@@ -210,12 +210,12 @@ func TestLogStoreConcurrentReadWrite(t *testing.T) {
 		}(i)
 		go func() {
 			defer wg.Done()
-			_, _ = ls.List()
+			_, _ = ls.List(nell.DefaultCollection)
 		}()
 	}
 	wg.Wait()
 
-	list, _ := ls.List()
+	list, _ := ls.List(nell.DefaultCollection)
 	if len(list) < 10 {
 		t.Errorf("expected at least 10 records, got %d", len(list))
 	}
@@ -230,15 +230,17 @@ func TestLogStoreConcurrentPutAndGetChangesSince(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 20 {
-		wg.Go(func() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 			_, _ = ls.PutLocal(&nell.Record{ID: "churn", Type: nell.TypeText, Payload: []byte("x")})
 			_, _ = ls.GetChangesSince(nell.HLC{})
-		})
+		}()
 	}
 	wg.Wait()
 
 	// Must still be alive and consistent
-	_, err := ls.Get("anchor")
+	_, err := ls.Get(nell.DefaultCollection, "anchor")
 	if err != nil {
 		t.Fatalf("anchor lost after concurrent churn: %v", err)
 	}
