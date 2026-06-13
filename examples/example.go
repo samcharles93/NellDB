@@ -45,7 +45,7 @@ func main() {
 	// ── 1. Open a local store and wrap it as a DocDB ─────────────────────
 	// MemoryStore is fine for examples; swap in logstore.OpenLog for persistence.
 	store := nell.NewMemoryStore("example-node")
-	db := sdk.New(store, "example-node")
+	db := sdk.New(store, "example-node", nell.DefaultCollection)
 
 	fmt.Println("▸ opened db")
 	fmt.Printf("  %+v\n\n", db.Info())
@@ -139,7 +139,7 @@ func main() {
 		// Open a second client and pull to prove the data made the round-trip.
 		fmt.Println("\n▸ opening a second client to verify the round-trip")
 		store2 := nell.NewMemoryStore("example-client-2")
-		db2 := sdk.New(store2, "example-client-2")
+		db2 := sdk.New(store2, "example-client-2", nell.DefaultCollection)
 		rep2 := sdk.NewReplicator(db2, *serverURL)
 		pulled, err = rep2.Pull(ctx)
 		must(err)
