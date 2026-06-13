@@ -27,7 +27,7 @@ func TestMemoryStoreConcurrentPuts(t *testing.T) {
 	}
 	wg.Wait()
 
-	rec, err := s.Get("shared")
+	rec, err := s.Get(DefaultCollection, "shared")
 	if err != nil {
 		t.Fatalf("record lost after concurrent writes: %v", err)
 	}
@@ -54,12 +54,12 @@ func TestMemoryStoreConcurrentPutAndList(t *testing.T) {
 		}(i)
 		go func() {
 			defer wg.Done()
-			_, _ = s.List()
+			_, _ = s.List(DefaultCollection)
 		}()
 	}
 	wg.Wait()
 
-	list, _ := s.List()
+	list, _ := s.List(DefaultCollection)
 	if len(list) < 10 {
 		t.Errorf("expected at least 10 records, got %d", len(list))
 	}
@@ -73,8 +73,8 @@ func TestMemoryStoreConcurrentDeleteAndGet(t *testing.T) {
 	for range 20 {
 		wg.Go(func() {
 			// Delete and immediately try to read — should never panic
-			_, _ = s.Delete("target")
-			_, _ = s.Get("target")
+			_, _ = s.Delete(DefaultCollection, "target")
+			_, _ = s.Get(DefaultCollection, "target")
 		})
 	}
 	wg.Wait()
@@ -87,7 +87,7 @@ func TestMemoryStorePutEmptyID(t *testing.T) {
 	if _, err := s.PutLocal(&Record{ID: "", Type: TypeText, Payload: []byte("no-id")}); err != nil {
 		t.Fatalf("PutLocal with empty ID failed: %v", err)
 	}
-	got, err := s.Get("")
+	got, err := s.Get(DefaultCollection, "")
 	if err != nil {
 		t.Fatalf("Get with empty ID failed: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestMemoryStorePutEmptyID(t *testing.T) {
 
 func TestMemoryStoreGetNonExistent(t *testing.T) {
 	s := NewMemoryStore("node-a")
-	_, err := s.Get("does-not-exist")
+	_, err := s.Get(DefaultCollection, "does-not-exist")
 	if err == nil {
 		t.Error("expected error for non-existent record, got nil")
 	}
@@ -106,7 +106,7 @@ func TestMemoryStoreGetNonExistent(t *testing.T) {
 
 func TestMemoryStoreDeleteNonExistent(t *testing.T) {
 	s := NewMemoryStore("node-a")
-	rec, err := s.Delete("never-created")
+	rec, err := s.Delete(DefaultCollection, "never-created")
 	if err != nil {
 		t.Fatalf("delete of non-existent record should create a tombstone: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestMemoryStoreDeleteNonExistent(t *testing.T) {
 
 func TestMemoryStoreListEmpty(t *testing.T) {
 	s := NewMemoryStore("node-a")
-	list, err := s.List()
+	list, err := s.List(DefaultCollection)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestMemoryStoreManyRecords(t *testing.T) {
 	for i := range n {
 		_, _ = s.PutLocal(&Record{ID: fmt.Sprintf("doc-%05d", i), Type: TypeText, Payload: []byte("data")})
 	}
-	list, err := s.List()
+	list, err := s.List(DefaultCollection)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +421,7 @@ func TestMemoryStoreLargePayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.Get("big-one")
+	got, err := s.Get(DefaultCollection, "big-one")
 	if err != nil {
 		t.Fatal(err)
 	}
