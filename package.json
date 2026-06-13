@@ -1,0 +1,9 @@
+{
+  "name": "nelldb-wasm-tests",
+  "version": "0.0.0",
+  "private": true,
+  "description": "NellDB test-only Node deps for the WASM client integration tests. The runtime JS SDK ships as its own package (@nelldb/sdk).",
+  "devDependencies": {
+    "fake-indexeddb": "^6.0.0"
+  }
+}
