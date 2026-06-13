@@ -50,11 +50,12 @@ class NellDB {
     /**
      * Insert or update a document.
      * @param {object} doc - Document object, requires an _id.
-     * @returns {{ok:boolean, rev:string}}
+     * @returns {Promise<{ok:boolean, rev:string}>}
      */
-    put(doc) {
+    async put(doc) {
         this._requireReady();
-        const resp = JSON.parse(globalScope.nellPut(JSON.stringify(doc)));
+        const respRaw = await globalScope.nellPut(JSON.stringify(doc));
+        const resp = JSON.parse(respRaw);
         if (!resp.ok) throw new Error(resp.error);
         // Note: the SDK docdb mutates the passed in doc with _rev in Go,
         // we reflect that here if we want or just return the rev.
@@ -65,11 +66,12 @@ class NellDB {
     /**
      * Fetch a single document by ID.
      * @param {string} id
-     * @returns {object} The document.
+     * @returns {Promise<object>} The document.
      */
-    get(id) {
+    async get(id) {
         this._requireReady();
-        const resp = JSON.parse(globalScope.nellGet(id));
+        const respRaw = await globalScope.nellGet(id);
+        const resp = JSON.parse(respRaw);
         if (!resp.ok) throw new Error(resp.error);
         return resp.doc;
     }
@@ -77,12 +79,13 @@ class NellDB {
     /**
      * Tombstone a document.
      * @param {string|object} idOrDoc
-     * @returns {{ok:boolean, rev:string}}
+     * @returns {Promise<{ok:boolean, rev:string}>}
      */
-    remove(idOrDoc) {
+    async remove(idOrDoc) {
         this._requireReady();
         const arg = typeof idOrDoc === 'string' ? idOrDoc : JSON.stringify(idOrDoc);
-        const resp = JSON.parse(globalScope.nellRemove(arg));
+        const respRaw = await globalScope.nellRemove(arg);
+        const resp = JSON.parse(respRaw);
         if (!resp.ok) throw new Error(resp.error);
         return resp;
     }
@@ -90,13 +93,47 @@ class NellDB {
     /**
      * List all non-deleted documents.
      * @param {object} options
-     * @returns {object} AllDocsResult
+     * @returns {Promise<object>} AllDocsResult
      */
-    allDocs(options = {}) {
+    async allDocs(options = {}) {
         this._requireReady();
-        const resp = JSON.parse(globalScope.nellAllDocs(JSON.stringify(options)));
+        const respRaw = await globalScope.nellAllDocs(JSON.stringify(options));
+        const resp = JSON.parse(respRaw);
         if (!resp.ok) throw new Error(resp.error);
         return resp.result;
+    }
+
+    /**
+     * Perform a vector similarity search using Cosine Similarity.
+     * @param {number[]} vector - The query embedding vector.
+     * @param {number} limit - Maximum number of results to return.
+     * @returns {Promise<object[]>} The top matching documents.
+     */
+    async searchSimilar(vector, limit = 10) {
+        this._requireReady();
+        const respRaw = await globalScope.nellSearchSimilar(JSON.stringify(vector), limit);
+        const resp = JSON.parse(respRaw);
+        if (!resp.ok) throw new Error(resp.error);
+        return resp.docs;
+    }
+
+    /**
+     * Get database metadata and statistics.
+     * @returns {Promise<object>}
+     */
+    async info() {
+        this._requireReady();
+        const infoRaw = await globalScope.nellInfo();
+        return JSON.parse(infoRaw);
+    }
+
+    /**
+     * Get the local node identifier.
+     * @returns {string}
+     */
+    nodeID() {
+        this._requireReady();
+        return globalScope.nellNodeID();
     }
 
     // ── Sync ──────────────────────────────────────────────────────────────
