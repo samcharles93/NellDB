@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"sort"
+	"runtime"
 	"sync"
 	"time"
 
@@ -41,8 +41,9 @@ import (
 //	got, err := db.Get(ctx, "x")
 //	rows, err := db.AllDocs(ctx, sdk.DocRange{IncludeDocs: true})
 type DocDB struct {
-	store  nell.Store
-	nodeID string
+	store      nell.Store
+	nodeID     string
+	collection string
 
 	mu     sync.RWMutex
 	revs   map[string]string    // id -> current rev, cache of payload truth
@@ -63,12 +64,16 @@ type DocDB struct {
 // On construction, DocDB scans the store to rebuild the in-memory _rev index
 // and the replication clock.  O(n) over local records; fine for in-memory and
 // the replay path of LogStore.
-func New(store nell.Store, nodeID string) *DocDB {
+func New(store nell.Store, nodeID string, collection string) *DocDB {
+	if collection == "" {
+		collection = nell.DefaultCollection
+	}
 	d := &DocDB{
-		store:  store,
-		nodeID: nodeID,
-		revs:   make(map[string]string),
-		subs:   newChangesHub(),
+		store:      store,
+		nodeID:     nodeID,
+		collection: collection,
+		revs:       make(map[string]string),
+		subs:       newChangesHub(),
 	}
 	if kv, ok := d.readMetaVector(); ok {
 		d.vector = kv
@@ -80,7 +85,7 @@ func New(store nell.Store, nodeID string) *DocDB {
 // reindex rebuilds the rev cache and replication clock from the logstore.
 // Called on New() and after a wholesale import.  Idempotent.
 func (d *DocDB) reindex() {
-	all, err := d.store.List()
+	all, err := d.store.List(d.collection)
 	if err != nil {
 		return
 	}
@@ -175,18 +180,38 @@ func (d *DocDB) Put(ctx context.Context, doc Doc) (string, error) {
 		return "", fmt.Errorf("sdk: marshal final: %w", err)
 	}
 
+	recType := nell.TypeText
+	if tStr, ok := doc[FieldType].(string); ok {
+		recType = tStr
+	}
+
+	var vector []float32
+	if vec, ok := doc[FieldVector].([]float32); ok {
+		vector = vec
+	} else if vecIntf, ok := doc[FieldVector].([]any); ok {
+		// When parsing from JSON, numbers might come as float64 (via interface{})
+		vector = make([]float32, len(vecIntf))
+		for i, v := range vecIntf {
+			if f, ok := v.(float64); ok {
+				vector[i] = float32(f)
+			}
+		}
+	}
+
 	rec := nell.Record{
-		ID:        id,
-		Type:      nell.TypeText,
-		Payload:   final,
-		UpdatedBy: d.nodeID,
-		Deleted:   deleted,
+		Collection: d.collection,
+		ID:         id,
+		Type:       recType,
+		Payload:    final,
+		Vector:     vector,
+		UpdatedBy:  d.nodeID,
+		Deleted:    deleted,
 	}
 	// HLC: merge with any existing clock so concurrent local + remote writes
 	// converge to the latest logical time.  Use the local clock as the
 	// authoritative time on this node.
 	clk := nell.NewHLC()
-	if existing, err := d.store.Get(id); err == nil {
+	if existing, err := d.store.Get(d.collection, id); err == nil {
 		clk.Update(existing.Clock)
 	}
 	rec.Clock = clk.Tick()
@@ -211,7 +236,7 @@ func (d *DocDB) Get(ctx context.Context, id string) (Doc, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	rec, err := d.store.Get(id)
+	rec, err := d.store.Get(d.collection, id)
 	if err != nil {
 		if isNotFoundErr(err) {
 			return nil, ErrNotFound
@@ -221,7 +246,7 @@ func (d *DocDB) Get(ctx context.Context, id string) (Doc, error) {
 	if rec.Deleted {
 		return nil, ErrNotFound
 	}
-	return joinDoc(id, rec.Payload), nil
+	return joinDoc(id, rec), nil
 }
 
 // Remove tombstones a document.  Accepts either an _id string or a Doc with
@@ -256,10 +281,10 @@ func (d *DocDB) Remove(ctx context.Context, idOrDoc any) (string, error) {
 		baseRev = curRev
 	}
 
-	rec, err := d.store.Get(id)
+	rec, err := d.store.Get(d.collection, id)
 	if err != nil {
 		if isNotFoundErr(err) {
-			rec = nell.Record{ID: id, Type: nell.TypeText, UpdatedBy: d.nodeID, Clock: nell.NewHLC()}
+			rec = nell.Record{Collection: d.collection, ID: id, Type: nell.TypeText, UpdatedBy: d.nodeID, Clock: nell.NewHLC()}
 		} else {
 			return "", err
 		}
@@ -359,7 +384,7 @@ func (d *DocDB) AllDocs(ctx context.Context, rng DocRange) (AllDocsResult, error
 			if !keyInRange(id, rng.StartKey, rng.EndKey, rng.InclusiveEnd) {
 				continue
 			}
-			rec, err := d.store.Get(id)
+			rec, err := d.store.Get(d.collection, id)
 			if err != nil || rec.Deleted {
 				continue
 			}
@@ -368,32 +393,107 @@ func (d *DocDB) AllDocs(ctx context.Context, rng DocRange) (AllDocsResult, error
 		return AllDocsResult{TotalRows: len(rows), Offset: 0, Rows: rows}, nil
 	}
 
-	all, err := d.store.List()
+	all, err := d.store.List(d.collection)
 	if err != nil {
 		return AllDocsResult{}, err
 	}
-	rows := make([]DocRow, 0, len(all))
-	for _, rec := range all {
-		if rec.Deleted {
-			continue
-		}
-		if !keyInRange(rec.ID, rng.StartKey, rng.EndKey, rng.InclusiveEnd) {
-			continue
-		}
-		rows = append(rows, d.makeRow(rec.ID, rec, rng.IncludeDocs))
+
+	// ── Parallel Range Scan ───────────────────────────────────────────
+	numWorkers := runtime.NumCPU()
+	if numWorkers > 12 {
+		numWorkers = 12
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	if len(all) < 10000 { // Don't overhead with parallelism for small sets
+		numWorkers = 1
+	}
+
+	results := make(chan []DocRow, numWorkers)
+	chunkSize := (len(all) + numWorkers - 1) / numWorkers
+	var wg sync.WaitGroup
+
+	for w := 0; w < numWorkers; w++ {
+		start := w * chunkSize
+		if start >= len(all) {
+			break
+		}
+		end := start + chunkSize
+		if end > len(all) {
+			end = len(all)
+		}
+
+		wg.Add(1)
+		go func(chunk []nell.Record) {
+			defer wg.Done()
+			rows := make([]DocRow, 0, len(chunk)/10) // heuristic initial capacity
+			for _, rec := range chunk {
+				if rec.Deleted {
+					continue
+				}
+				if !keyInRange(rec.ID, rng.StartKey, rng.EndKey, rng.InclusiveEnd) {
+					continue
+				}
+				rows = append(rows, d.makeRow(rec.ID, rec, rng.IncludeDocs))
+			}
+			results <- rows
+		}(all[start:end])
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var finalRows []DocRow
+	for rows := range results {
+		finalRows = append(finalRows, rows...)
+	}
+
+	totalFound := len(finalRows)
 	if rng.Skip > 0 {
-		if rng.Skip >= len(rows) {
-			rows = nil
+		if rng.Skip >= len(finalRows) {
+			finalRows = nil
 		} else {
-			rows = rows[rng.Skip:]
+			finalRows = finalRows[rng.Skip:]
 		}
 	}
-	if rng.Limit > 0 && len(rows) > rng.Limit {
-		rows = rows[:rng.Limit]
+	if rng.Limit > 0 && len(finalRows) > rng.Limit {
+		finalRows = finalRows[:rng.Limit]
 	}
-	return AllDocsResult{TotalRows: len(rows), Rows: rows}, nil
+
+	return AllDocsResult{TotalRows: totalFound, Rows: finalRows}, nil
+}
+
+// SearchSimilar performs a vector similarity search (Cosine Similarity) against
+// all records of type "vector" in the collection. Returns the top-K matching
+// documents.
+func (d *DocDB) SearchSimilar(ctx context.Context, vector []float32, limit int) ([]Doc, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	
+	if limit <= 0 {
+		limit = 10 // Default limit
+	}
+
+	records, err := d.store.SearchSimilar(d.collection, vector, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	docs := make([]Doc, 0, len(records))
+	for _, rec := range records {
+		doc := joinDoc(rec.ID, rec)
+		
+		d.mu.RLock()
+		if rev, ok := d.revs[rec.ID]; ok {
+			doc[FieldRev] = rev
+		}
+		d.mu.RUnlock()
+		
+		docs = append(docs, doc)
+	}
+
+	return docs, nil
 }
 
 func (d *DocDB) makeRow(id string, rec nell.Record, includeDoc bool) DocRow {
@@ -409,7 +509,7 @@ func (d *DocDB) makeRow(id string, rec nell.Record, includeDoc bool) DocRow {
 	row := DocRow{ID: id, Key: id}
 	row.Value.Rev = rev
 	if includeDoc {
-		row.Doc = joinDoc(id, rec.Payload)
+		row.Doc = joinDoc(id, rec)
 	}
 	return row
 }
@@ -432,7 +532,7 @@ type Info struct {
 
 // Info returns a snapshot of the database's bookkeeping.
 func (d *DocDB) Info() Info {
-	all, _ := d.store.List()
+	all, _ := d.store.List(d.collection)
 	live := 0
 	for _, r := range all {
 		if isInternalID(r.ID) {
@@ -457,7 +557,7 @@ func (d *DocDB) Info() Info {
 // if they want the engine torn down too.  Space on disk is not reclaimed;
 // that requires a compaction pass on the LogStore (TODO v0.2).
 func (d *DocDB) Destroy(ctx context.Context) error {
-	all, err := d.store.List()
+	all, err := d.store.List(d.collection)
 	if err != nil {
 		return err
 	}
@@ -465,7 +565,7 @@ func (d *DocDB) Destroy(ctx context.Context) error {
 		if isInternalID(rec.ID) {
 			continue
 		}
-		if _, err := d.store.Get(rec.ID); err != nil {
+		if _, err := d.store.Get(d.collection, rec.ID); err != nil {
 			continue
 		}
 		if _, err := d.Remove(ctx, rec.ID); err != nil {
@@ -495,7 +595,7 @@ type bulkSnap struct {
 func splitDoc(doc Doc) map[string]any {
 	body := make(map[string]any, len(doc))
 	for k, v := range doc {
-		if k == FieldID || k == FieldDeleted {
+		if k == FieldID || k == FieldDeleted || k == FieldType || k == FieldVector {
 			continue
 		}
 		body[k] = v
@@ -513,14 +613,22 @@ func isDeleted(doc Doc) bool {
 // joinDoc rebuilds a Doc from a stored payload.  The _rev is taken from the
 // payload body (where the wire carries it), falling back to "1-imported" for
 // legacy records that pre-date the rev-in-payload convention.
-func joinDoc(id string, payload []byte) Doc {
+func joinDoc(id string, rec nell.Record) Doc {
 	out := Doc{FieldID: id}
-	if len(payload) == 0 {
+	
+	if rec.Type != "" && rec.Type != nell.TypeText {
+		out[FieldType] = rec.Type
+	}
+	if len(rec.Vector) > 0 {
+		out[FieldVector] = rec.Vector
+	}
+
+	if len(rec.Payload) == 0 {
 		return out
 	}
 	var body map[string]any
-	if err := json.Unmarshal(payload, &body); err != nil {
-		out["_payload_b64"] = payload
+	if err := json.Unmarshal(rec.Payload, &body); err != nil {
+		out["_payload_b64"] = rec.Payload
 		return out
 	}
 	maps.Copy(out, body)
