@@ -16,7 +16,7 @@ const metaVectorID = "meta:vector"
 
 // readMetaVector fetches the persisted knowledge vector, if any.
 func (d *DocDB) readMetaVector() (nell.KnowledgeVector, bool) {
-	rec, err := d.store.Get(metaVectorID)
+	rec, err := d.store.Get(d.collection, metaVectorID)
 	if err != nil {
 		return nil, false
 	}
@@ -39,11 +39,12 @@ func (d *DocDB) writeMetaVector(kv nell.KnowledgeVector) error {
 		clk.Update(c)
 	}
 	rec := nell.Record{
-		ID:        metaVectorID,
-		Type:      nell.TypeText,
-		Payload:   payload,
-		Clock:     clk.Tick(),
-		UpdatedBy: d.nodeID,
+		Collection: d.collection,
+		ID:         metaVectorID,
+		Type:       nell.TypeText,
+		Payload:    payload,
+		Clock:      clk.Tick(),
+		UpdatedBy:  d.nodeID,
 	}
 	if _, _, err := d.store.Put(rec); err != nil {
 		return fmt.Errorf("sdk: persist vector: %w", err)
