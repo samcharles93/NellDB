@@ -193,7 +193,7 @@ async function main() {
     throw new Error("nellReady was never set");
   }
 
-  const putResp = JSON.parse(globalThis.nellPut(JSON.stringify({
+  const putResp = JSON.parse(await globalThis.nellPut(JSON.stringify({
     _id: "note:1",
     title: "hello from wasm"
   })));
@@ -201,34 +201,34 @@ async function main() {
     throw new Error("unexpected put response: " + JSON.stringify(putResp));
   }
 
-  const getResp = JSON.parse(globalThis.nellGet("note:1"));
+  const getResp = JSON.parse(await globalThis.nellGet("note:1"));
   if (!getResp.ok || getResp.doc.title !== "hello from wasm" || !getResp.doc._rev) {
     throw new Error("unexpected get response: " + JSON.stringify(getResp));
   }
 
-  const listResp = JSON.parse(globalThis.nellAllDocs("{}"));
+  const listResp = JSON.parse(await globalThis.nellAllDocs("{}"));
   const userRows = listResp.result.rows.filter(r => !r.id.startsWith("meta:"));
   if (!listResp.ok || userRows.length !== 1 || userRows[0].id !== "note:1") {
     throw new Error("unexpected list response: " + JSON.stringify(listResp));
   }
 
-  const deleteResp = JSON.parse(globalThis.nellRemove("note:1"));
+  const deleteResp = JSON.parse(await globalThis.nellRemove("note:1"));
   if (!deleteResp.ok || !deleteResp.rev) {
     throw new Error("unexpected delete response: " + JSON.stringify(deleteResp));
   }
 
-  const emptyListResp = JSON.parse(globalThis.nellAllDocs("{}"));
+  const emptyListResp = JSON.parse(await globalThis.nellAllDocs("{}"));
   const emptyUserRows = emptyListResp.result.rows.filter(r => !r.id.startsWith("meta:"));
   if (!emptyListResp.ok || emptyUserRows.length !== 0) {
     throw new Error("unexpected list after delete: " + JSON.stringify(emptyListResp));
   }
 
-  const invalidJSONResp = JSON.parse(globalThis.nellPut("{not-json"));
+  const invalidJSONResp = JSON.parse(await globalThis.nellPut("{not-json"));
   if (invalidJSONResp.ok || !invalidJSONResp.error) {
     throw new Error("expected invalid JSON error, got: " + JSON.stringify(invalidJSONResp));
   }
 
-  const missingIDResp = JSON.parse(globalThis.nellGet(""));
+  const missingIDResp = JSON.parse(await globalThis.nellGet(""));
   if (missingIDResp.ok || !missingIDResp.error) {
     throw new Error("expected error, got: " + JSON.stringify(missingIDResp));
   }
@@ -315,7 +315,7 @@ async function main() {
   if (typeof nodeID1 !== "string" || !/^[0-9a-f-]{36}$/.test(nodeID1)) {
     throw new Error("first nodeID is not a UUID: " + JSON.stringify(nodeID1));
   }
-  const putResp = JSON.parse(globalThis.nellPut(JSON.stringify({
+  const putResp = JSON.parse(await globalThis.nellPut(JSON.stringify({
     _id: "persistence-test",
     body: "from the first session"
   })));
@@ -331,13 +331,13 @@ async function main() {
     throw new Error("nodeID changed across reloads: " + nodeID1 + " vs " + nodeID2);
   }
 
-  const getResp = JSON.parse(globalThis.nellGet("persistence-test"));
+  const getResp = JSON.parse(await globalThis.nellGet("persistence-test"));
   if (!getResp.ok || getResp.doc.body !== "from the first session") {
     throw new Error("doc lost across reloads: " + JSON.stringify(getResp));
   }
 
   // AllDocs should still list the doc.
-  const listResp = JSON.parse(globalThis.nellAllDocs("{}"));
+  const listResp = JSON.parse(await globalThis.nellAllDocs("{}"));
   const userRows = (listResp.result.rows || []).filter(r => !r.id.startsWith("meta:"));
   if (!listResp.ok || userRows.length !== 1 || userRows[0].id !== "persistence-test") {
     throw new Error("AllDocs lost the doc across reloads: " + JSON.stringify(listResp));
