@@ -36,7 +36,7 @@ func TestLogStorePersistence(t *testing.T) {
 	}
 	defer func() { _ = ls2.Close() }()
 
-	rec, err := ls2.Get("doc-1")
+	rec, err := ls2.Get(nell.DefaultCollection, "doc-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestLogStorePersistence(t *testing.T) {
 		t.Errorf("payload = %q, want hello", rec.Payload)
 	}
 
-	list, _ := ls2.List()
+	list, _ := ls2.List(nell.DefaultCollection)
 	if len(list) != 2 {
 		t.Errorf("got %d records, want 2", len(list))
 	}
@@ -56,13 +56,13 @@ func TestLogStoreDeleteAndReopen(t *testing.T) {
 	ls, _ := OpenLog(path, "node-a")
 	_, _ = ls.PutLocal(&nell.Record{ID: "doc-1", Type: nell.TypeText, Payload: []byte("keep")})
 	_, _ = ls.PutLocal(&nell.Record{ID: "doc-2", Type: nell.TypeText, Payload: []byte("gone")})
-	_, _ = ls.Delete("doc-2")
+	_, _ = ls.Delete(nell.DefaultCollection, "doc-2")
 	_ = ls.Close()
 
 	ls2, _ := OpenLog(path, "node-a")
 	defer func() { _ = ls2.Close() }()
 
-	list, _ := ls2.List()
+	list, _ := ls2.List(nell.DefaultCollection)
 	if len(list) != 1 {
 		t.Fatalf("got %d records, want 1 (one deleted)", len(list))
 	}
@@ -102,7 +102,7 @@ func TestLogStoreCompactBasic(t *testing.T) {
 	}
 
 	// Records should still be readable
-	rec, err := ls.Get("doc-1")
+	rec, err := ls.Get(nell.DefaultCollection, "doc-1")
 	if err != nil {
 		t.Fatalf("Get after compact: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestLogStoreCompactTombstoneRetention(t *testing.T) {
 
 	ls, _ := OpenLog(path, "node-a")
 	_, _ = ls.PutLocal(&nell.Record{ID: "keep", Type: nell.TypeText, Payload: []byte("alive")})
-	_, _ = ls.Delete("keep") // now a tombstone with a recent clock
+	_, _ = ls.Delete(nell.DefaultCollection, "keep") // now a tombstone with a recent clock
 
 	// Compact with a 1-hour threshold — recent tombstone should be retained
 	n, err := ls.Compact(time.Hour)
@@ -133,13 +133,13 @@ func TestLogStoreCompactTombstoneRetention(t *testing.T) {
 	}
 
 	// The tombstone should still be in the store
-	_, getErr := ls.Get("keep")
+	_, getErr := ls.Get(nell.DefaultCollection, "keep")
 	if getErr != nil {
 		t.Errorf("recent tombstone lost: %v", getErr)
 	}
 
 	// List should NOT include the tombstone (it's deleted)
-	list, _ := ls.List()
+	list, _ := ls.List(nell.DefaultCollection)
 	if len(list) != 0 {
 		t.Errorf("List returned %d records after delete, want 0", len(list))
 	}
@@ -185,7 +185,7 @@ func TestLogStoreCompactDropsOldTombstones(t *testing.T) {
 	}
 
 	// The old tombstone should be gone entirely.
-	_, getErr := ls.Get("old")
+	_, getErr := ls.Get(nell.DefaultCollection, "old")
 	if getErr == nil {
 		t.Error("old tombstone survived compaction with 1h threshold")
 	}
@@ -196,7 +196,7 @@ func TestLogStoreCompactDropsOldTombstones(t *testing.T) {
 	// Reopen to verify the tombstone is gone from the file.
 	ls2, _ := OpenLog(path, "node-a")
 	defer func() { _ = ls2.Close() }()
-	list, _ := ls2.List()
+	list, _ := ls2.List(nell.DefaultCollection)
 	if len(list) != 0 {
 		t.Errorf("List after compact+reopen: got %d records, want 0", len(list))
 	}
@@ -235,7 +235,7 @@ func TestLogStoreCompactKeepsLatestVersion(t *testing.T) {
 	ls2, _ := OpenLog(path, "node-a")
 	defer func() { _ = ls2.Close() }()
 
-	list, _ := ls2.List()
+	list, _ := ls2.List(nell.DefaultCollection)
 	if len(list) != 1 {
 		t.Fatalf("after reopen: got %d records, want 1", len(list))
 	}
@@ -262,7 +262,7 @@ func TestLogStoreCompactEmptyLog(t *testing.T) {
 
 	ls2, _ := OpenLog(path, "node-a")
 	defer func() { _ = ls2.Close() }()
-	list, _ := ls2.List()
+	list, _ := ls2.List(nell.DefaultCollection)
 	if len(list) != 1 {
 		t.Errorf("after compact-empty + write: %d records", len(list))
 	}
@@ -274,7 +274,7 @@ func TestLogStoreCompactReplay(t *testing.T) {
 	ls, _ := OpenLog(path, "node-a")
 	_, _ = ls.PutLocal(&nell.Record{ID: "doc-1", Type: nell.TypeText, Payload: []byte("kept")})
 	_, _ = ls.PutLocal(&nell.Record{ID: "doc-2", Type: nell.TypeText, Payload: []byte("also-kept")})
-	_, _ = ls.Delete("doc-2")
+	_, _ = ls.Delete(nell.DefaultCollection, "doc-2")
 	_, _ = ls.Compact(0) // drop all tombstones
 	_ = ls.Close()
 
@@ -282,7 +282,7 @@ func TestLogStoreCompactReplay(t *testing.T) {
 	ls2, _ := OpenLog(path, "node-a")
 	defer func() { _ = ls2.Close() }()
 
-	list, _ := ls2.List()
+	list, _ := ls2.List(nell.DefaultCollection)
 	if len(list) != 1 {
 		t.Fatalf("after compact+reopen: %d records, want 1 (tombstone dropped)", len(list))
 	}
@@ -311,13 +311,13 @@ func TestLogStoreLWWOnReplay(t *testing.T) {
 	ls2, _ := OpenLog(path, "node-a")
 	defer func() { _ = ls2.Close() }()
 
-	rec, _ := ls2.Get("doc-1")
+	rec, _ := ls2.Get(nell.DefaultCollection, "doc-1")
 	// On replay, the LWW resolution is applied per-pair, but the final map
 	// should hold the winning version.
 	_ = rec
 	// Verify doc-1 exists (don't assert which version — LWW is deterministic
 	// but the replay order is file order, and the last-written frame wins).
-	list, _ := ls2.List()
+	list, _ := ls2.List(nell.DefaultCollection)
 	found := false
 	for _, r := range list {
 		if r.ID == "doc-1" {
