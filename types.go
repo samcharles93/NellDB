@@ -245,7 +245,7 @@ func (r *Record) UnmarshalBinary(b []byte) error {
 		return errors.New("nell: truncated vector data")
 	}
 	r.Vector = make([]float32, vC)
-	for i := 0; i < vC; i++ {
+	for i := range vC {
 		bits := binary.BigEndian.Uint32(b[off:])
 		r.Vector[i] = math.Float32frombits(bits)
 		off += 4

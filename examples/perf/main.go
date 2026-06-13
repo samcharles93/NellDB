@@ -20,14 +20,14 @@ func main() {
 	db := sdk.New(store, "benchmark-node", nell.DefaultCollection)
 
 	fmt.Printf("▸ Starting benchmark: 1,000,000 rows in batches of %d\n", batchSize)
-	
+
 	start := time.Now()
 	var memBefore runtime.MemStats
 	runtime.ReadMemStats(&memBefore)
 
 	for i := 0; i < count; i += batchSize {
 		batch := make([]sdk.Doc, batchSize)
-		for j := 0; j < batchSize; j++ {
+		for j := range batchSize {
 			id := i + j
 			batch[j] = sdk.Doc{
 				sdk.FieldID: fmt.Sprintf("doc:%07d", id),
@@ -43,13 +43,13 @@ func main() {
 		}
 
 		if (i+batchSize)%100_000 == 0 {
-			elapsed := time.Now().Sub(start)
+			elapsed := time.Since(start)
 			ops := float64(i+batchSize) / elapsed.Seconds()
 			fmt.Printf("  Progress: %d/%d (%.1f ops/s)\n", i+batchSize, count, ops)
 		}
 	}
 
-	totalTime := time.Now().Sub(start)
+	totalTime := time.Since(start)
 	var memAfter runtime.MemStats
 	runtime.ReadMemStats(&memAfter)
 

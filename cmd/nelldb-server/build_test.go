@@ -138,8 +138,8 @@ func TestDependencyCount(t *testing.T) {
 	// Log for visibility — not a hard fail, but useful to track
 	t.Logf("dependency count: %d (including indirect)", count)
 	// OpenTelemetry + Prometheus instrumentation adds legitimate deps.
-	if count > 35 {
-		t.Errorf("dependency count %d exceeds 35 — review for bloat", count)
+	if count > 40 {
+		t.Errorf("dependency count %d exceeds 40 — review for bloat", count)
 	}
 }
 

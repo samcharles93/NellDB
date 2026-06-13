@@ -25,7 +25,19 @@
 - `sdk.Replicator` is the important replication path for Go clients. Its pull path uses `/sync/check`, not `/sync/pull`, so per-peer knowledge vectors survive concurrent writes from different nodes. `MeshManager` in `server/peer.go` uses the same endpoint for periodic server-to-server reconciliation.
 - `client/` is the WASM + JS bridge. `client/main.go` exposes global JS callbacks (`nellPut`, `nellGet`, `nellDelete`, `nellList`) backed by a `MemoryStore`; `client/nell.js` is a thin wrapper around those callbacks. This side is simpler than the Go SDK and still has TODOs around full sync behavior.
 - `cmd/nelldb-server/` is only the CLI wiring: flags choose `MemoryStore` vs `logstore`, then wrap it in `server.New(...)` and optionally start the peer mesh loop.
-- `examples/example.go` is the fastest end-to-end orientation for the Go SDK: local CRUD, `_rev` conflicts, `AllDocs`, changes feeds, and replication against a running server.
+- `examples/tour/main.go` is the fastest end-to-end orientation for the Go SDK: local CRUD, `_rev` conflicts, `AllDocs`, changes feeds, and replication against a running server.
+
+## Go version & idioms
+
+This project targets **Go 1.26**. Always write code in the modern idiom — do not write Go 1.18– style when the language has moved on. Before submitting changes, run `go fix ./...` to apply automated modernizations. Key patterns:
+
+- `for i := 0; i < n; i++` → `for i := range n` (Go 1.22+ range-over-int)
+- `for i := 0; i < n; i++` with unused `i` → `for range n`
+- `end := start + chunkSize; if end > len(x) { end = len(x) }` → `end := min(start+chunkSize, len(x))` (builtin `min`/`max`, Go 1.21+)
+- `time.Now().Sub(t)` → `time.Since(t)`
+- In tests: `context.Background()` → `t.Context()` for timeout-bound contexts
+- `[]byte(fmt.Sprintf(...))` → `fmt.Appendf(nil, ...)` for zero-alloc string building
+- `wg.Add(1); go func() { defer wg.Done(); ... }()` → `wg.Go(func() { ... })` (available in x/sync or Go 1.26 `sync.WaitGroup.Go`)
 
 ## Key conventions
 

@@ -158,7 +158,7 @@ func registerCallbacks() {
 		if len(args) < 2 {
 			return asyncPromise(func() (any, error) { return nil, fmt.Errorf("missing arguments") })
 		}
-		
+
 		vectorStr := args[0].String()
 		limit := args[1].Int()
 
@@ -167,12 +167,12 @@ func registerCallbacks() {
 			if err := json.Unmarshal([]byte(vectorStr), &vector); err != nil {
 				return errorJSON(err.Error()), nil
 			}
-			
+
 			docs, err := db.SearchSimilar(ctx, vector, limit)
 			if err != nil {
 				return errorJSON(err.Error()), nil
 			}
-			
+
 			resp, _ := json.Marshal(map[string]any{"ok": true, "docs": docs})
 			return string(resp), nil
 		})

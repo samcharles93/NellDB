@@ -21,38 +21,38 @@ func main() {
 	// (e.g., text-embedding-ada-002, or a local ONNX model).
 	docs := []sdk.Doc{
 		{
-			sdk.FieldID: "doc:apple",
-			sdk.FieldType: nell.TypeVector,
-			"name":      "Apple",
-			"category":  "fruit",
+			sdk.FieldID:     "doc:apple",
+			sdk.FieldType:   nell.TypeVector,
+			"name":          "Apple",
+			"category":      "fruit",
 			sdk.FieldVector: []float32{0.9, 0.1, 0.1},
 		},
 		{
-			sdk.FieldID: "doc:banana",
-			sdk.FieldType: nell.TypeVector,
-			"name":      "Banana",
-			"category":  "fruit",
+			sdk.FieldID:     "doc:banana",
+			sdk.FieldType:   nell.TypeVector,
+			"name":          "Banana",
+			"category":      "fruit",
 			sdk.FieldVector: []float32{0.8, 0.2, 0.1},
 		},
 		{
-			sdk.FieldID: "doc:dog",
-			sdk.FieldType: nell.TypeVector,
-			"name":      "Dog",
-			"category":  "animal",
+			sdk.FieldID:     "doc:dog",
+			sdk.FieldType:   nell.TypeVector,
+			"name":          "Dog",
+			"category":      "animal",
 			sdk.FieldVector: []float32{0.1, 0.9, 0.2},
 		},
 		{
-			sdk.FieldID: "doc:cat",
-			sdk.FieldType: nell.TypeVector,
-			"name":      "Cat",
-			"category":  "animal",
+			sdk.FieldID:     "doc:cat",
+			sdk.FieldType:   nell.TypeVector,
+			"name":          "Cat",
+			"category":      "animal",
 			sdk.FieldVector: []float32{0.1, 0.8, 0.3},
 		},
 		{
-			sdk.FieldID: "doc:car",
-			sdk.FieldType: nell.TypeVector,
-			"name":      "Car",
-			"category":  "vehicle",
+			sdk.FieldID:     "doc:car",
+			sdk.FieldType:   nell.TypeVector,
+			"name":          "Car",
+			"category":      "vehicle",
 			sdk.FieldVector: []float32{0.0, 0.1, 0.9},
 		},
 	}
@@ -64,7 +64,7 @@ func main() {
 	fmt.Printf("▸ Inserted %d vector documents\n\n", len(docs))
 
 	// 2. Perform Similarity Searches
-	
+
 	// Query 1: Find something similar to a generic "fruit" vector
 	queryFruit := []float32{1.0, 0.0, 0.0}
 	fmt.Println("▸ Searching for vector similar to [1.0, 0.0, 0.0] (expected: fruits)")

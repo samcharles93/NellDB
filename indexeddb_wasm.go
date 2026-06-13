@@ -234,7 +234,6 @@ func resolveOrCreateNodeID(db js.Value) (string, error) {
 	return newID, nil
 }
 
-
 // ── Store Interface implementation ──────────────────────────────────────────
 
 func (s *IndexedDBStore) Put(incoming Record) (bool, Record, error) {
@@ -262,7 +261,7 @@ func (s *IndexedDBStore) Put(incoming Record) (bool, Record, error) {
 
 	txn := s.db.Call("transaction", []any{"records"}, "readwrite")
 	store := txn.Call("objectStore", "records")
-	
+
 	key := winner.Collection + ":" + winner.ID
 	request := store.Call("put", jsObj, key)
 
@@ -292,9 +291,9 @@ func (s *IndexedDBStore) Put(incoming Record) (bool, Record, error) {
 	}
 
 	return winner == &incoming, *winner, nil
-	}
+}
 
-	func (s *IndexedDBStore) Get(collection, id string) (Record, error) {
+func (s *IndexedDBStore) Get(collection, id string) (Record, error) {
 	if collection == "" {
 		collection = DefaultCollection
 	}
@@ -344,9 +343,9 @@ func (s *IndexedDBStore) Put(incoming Record) (bool, Record, error) {
 	}
 
 	return rec, nil
-	}
+}
 
-	func (s *IndexedDBStore) Delete(collection, id string) (Record, error) {
+func (s *IndexedDBStore) Delete(collection, id string) (Record, error) {
 	if collection == "" {
 		collection = DefaultCollection
 	}
@@ -366,9 +365,9 @@ func (s *IndexedDBStore) Put(incoming Record) (bool, Record, error) {
 
 	_, winner, err := s.Put(rec)
 	return winner, err
-	}
+}
 
-	func (s *IndexedDBStore) List(collection string) ([]Record, error) {
+func (s *IndexedDBStore) List(collection string) ([]Record, error) {
 	if collection == "" {
 		collection = DefaultCollection
 	}
@@ -423,13 +422,13 @@ func (s *IndexedDBStore) Put(incoming Record) (bool, Record, error) {
 	}
 
 	return records, nil
-	}
+}
 
-	func (s *IndexedDBStore) Query(q Query) ([]Record, error) {
+func (s *IndexedDBStore) Query(q Query) ([]Record, error) {
 	return s.List(q.Collection)
-	}
+}
 
-	func (s *IndexedDBStore) GetChangesSince(since HLC) ([]Record, error) {
+func (s *IndexedDBStore) GetChangesSince(since HLC) ([]Record, error) {
 	txn := s.db.Call("transaction", []any{"records"}, "readonly")
 	store := txn.Call("objectStore", "records")
 	index := store.Call("index", "clock")
@@ -515,7 +514,7 @@ func (s *IndexedDBStore) SearchSimilar(collection string, queryVector []float32,
 
 	sort.Slice(allScored, func(i, j int) bool {
 		if allScored[i].score == allScored[j].score {
-			return allScored[i].rec.ID < allScored[j].rec.ID 
+			return allScored[i].rec.ID < allScored[j].rec.ID
 		}
 		return allScored[i].score > allScored[j].score
 	})
@@ -531,4 +530,3 @@ func (s *IndexedDBStore) SearchSimilar(collection string, queryVector []float32,
 
 	return out, nil
 }
-

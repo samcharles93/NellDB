@@ -23,16 +23,19 @@ type Config struct {
 		MaxBatchSize          int `yaml:"max_batch_size"`
 		StalenessEvictionDays int `yaml:"staleness_eviction_days"`
 	} `yaml:"sync"`
+	Discovery struct {
+		Enabled bool `yaml:"enabled"`
+	} `yaml:"discovery"`
 	Compaction struct {
 		IntervalMinutes int `yaml:"interval_minutes"`
 	} `yaml:"compaction"`
 	Vector struct {
-		EnableHNSW               bool `yaml:"enable_hnsw"`
-		PCADimensions            int  `yaml:"pca_dimensions"`
-		TrainingSampleSize       int  `yaml:"training_sample_size"`
+		EnableHNSW                bool `yaml:"enable_hnsw"`
+		PCADimensions             int  `yaml:"pca_dimensions"`
+		TrainingSampleSize        int  `yaml:"training_sample_size"`
 		RetrainingInsertThreshold int  `yaml:"retraining_insert_threshold"`
-		PQSubspaces              int  `yaml:"pq_subspaces"`
-		PQCentroids              int  `yaml:"pq_centroids"`
+		PQSubspaces               int  `yaml:"pq_subspaces"`
+		PQCentroids               int  `yaml:"pq_centroids"`
 	} `yaml:"vector"`
 }
 

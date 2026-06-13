@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/samcharles93/NellDB"
 )
 
@@ -35,6 +37,20 @@ func NewReplicator(db *DocDB, baseURL string) *Replicator {
 		DB:      db,
 		BaseURL: baseURL,
 		HTTP:    &http.Client{Timeout: 30 * time.Second},
+	}
+}
+
+// SetAuthSecret configures the Replicator to HMAC-sign all HTTP requests
+// with the given secret.  The server must be configured with the same secret
+// for the requests to be accepted.  Pass nil to disable signing.
+func (r *Replicator) SetAuthSecret(secret []byte) {
+	if len(secret) == 0 {
+		r.HTTP.Transport = nil
+		return
+	}
+	r.HTTP.Transport = &signingTransport{
+		secret:    secret,
+		transport: http.DefaultTransport,
 	}
 }
 
@@ -114,9 +130,10 @@ func (r *Replicator) Pull(ctx context.Context) (int, error) {
 }
 
 // Push uploads all locally-held records the local node has in the
-// current collection, using the high-performance binary protocol.
+// current collection, including tombstones, using the high-performance
+// binary protocol so peers learn about deletions.
 func (r *Replicator) Push(ctx context.Context) (int, error) {
-	all, err := r.DB.store.List(r.DB.collection)
+	all, err := r.DB.listAll()
 	if err != nil {
 		return 0, fmt.Errorf("replicate push list: %w", err)
 	}
@@ -255,6 +272,138 @@ func (r *Replicator) Live(ctx context.Context, cfg LiveConfig) (stop func()) {
 	}
 }
 
+// LiveWS starts a background sync loop over a persistent WebSocket connection.
+// Unlike Live (HTTP polling), LiveWS receives changes in real time with lower
+// latency.  Returns a stop function; call it to shut down the connection.
+//
+// On disconnect the client reconnects with exponential backoff and jitter.
+func (r *Replicator) LiveWS(ctx context.Context, nodeID string) (stop func()) {
+	loopCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	backoff := 2 * time.Second
+	const maxBackoff = 60 * time.Second
+
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-loopCtx.Done():
+				return
+			default:
+			}
+
+			if err := r.runWS(loopCtx, nodeID); err != nil {
+				// Only log if not a clean shutdown.
+				select {
+				case <-loopCtx.Done():
+					return
+				default:
+				}
+			}
+
+			// Reconnect with backoff + jitter.
+			jitter := time.Duration(rand.Int63n(int64(backoff / 2)))
+			select {
+			case <-loopCtx.Done():
+				return
+			case <-time.After(backoff + jitter):
+			}
+			backoff = nextBackoff(backoff, maxBackoff)
+		}
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+// runWS maintains a single WebSocket session: connects, reads incoming
+// changes, and writes local changes.  Returns on disconnect or error.
+func (r *Replicator) runWS(ctx context.Context, nodeID string) error {
+	// Build WebSocket URL from base URL.
+	wsURL := r.BaseURL + "/sync/ws"
+	if nodeID != "" {
+		wsURL += "?node_id=" + url.QueryEscape(nodeID)
+	}
+	// Convert http:// → ws://, https:// → wss://
+	if len(wsURL) > 7 && wsURL[:7] == "http://" {
+		wsURL = "ws" + wsURL[4:]
+	} else if len(wsURL) > 8 && wsURL[:8] == "https://" {
+		wsURL = "wss" + wsURL[5:]
+	}
+
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	// Subscribe to local changes for push to the server.
+	changes := r.DB.Changes(ctx)
+
+	readDone := make(chan struct{})
+
+	// Read goroutine: receive remote changes from server.
+	go func() {
+		defer close(readDone)
+		for {
+			var msg struct {
+				Changes []nell.Record `json:"changes"`
+			}
+			if err := conn.ReadJSON(&msg); err != nil {
+				return
+			}
+			for _, rec := range msg.Changes {
+				_ = r.DB.ingestRemote(rec)
+			}
+		}
+	}()
+
+	// Write goroutine: send local changes to server.
+	writeDone := make(chan struct{})
+	go func() {
+		defer close(writeDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-readDone:
+				return
+			case ch, ok := <-changes:
+				if !ok {
+					return
+				}
+				if isInternalID(ch.ID) {
+					continue
+				}
+				// Build a record from the store for the wire.
+				rec, err := r.DB.store.Get(r.DB.collection, ch.ID)
+				if err != nil {
+					continue
+				}
+				msg := map[string]any{
+					"changes": []nell.Record{rec},
+				}
+				if err := conn.WriteJSON(msg); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	// Wait for either goroutine to exit.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-readDone:
+		<-writeDone
+	case <-writeDone:
+		<-readDone
+	}
+	return nil
+}
+
 // nextBackoff doubles the delay up to max.  A "real" implementation would
 // also reset on success, which the Live loop does by reassigning backoff.
 func nextBackoff(cur, max time.Duration) time.Duration {
@@ -266,6 +415,39 @@ func nextBackoff(cur, max time.Duration) time.Duration {
 }
 
 // ── internal ─────────────────────────────────────────────────────────────────
+
+// signingTransport is an http.RoundTripper that adds HMAC signature headers
+// to every request.  It uses the shared nell.SignBody function so the server
+// can validate signatures with the same secret.
+type signingTransport struct {
+	secret    []byte
+	transport http.RoundTripper
+}
+
+func (t *signingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Read and sign the body.
+	var bodyBytes []byte
+	if req.Body != nil {
+		bodyBytes, _ = io.ReadAll(req.Body)
+		req.Body.Close()
+	}
+	ts := time.Now().Unix()
+	sig := nell.SignBody(t.secret, ts, bodyBytes)
+
+	// Reconstruct body.
+	if bodyBytes != nil {
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	}
+	req.ContentLength = int64(len(bodyBytes))
+
+	req.Header.Set("X-Nell-Timestamp", fmt.Sprintf("%d", ts))
+	req.Header.Set("X-Nell-Signature", sig)
+
+	if t.transport != nil {
+		return t.transport.RoundTrip(req)
+	}
+	return http.DefaultTransport.RoundTrip(req)
+}
 
 // ingestRemote applies a record received from a peer to the local store.
 // The SDK reads the rev from the payload (where the wire format carries it)

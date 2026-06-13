@@ -25,7 +25,7 @@ func genRev(prev string, body []byte) string {
 	return strconv.Itoa(gen) + "-" + hex.EncodeToString(sum[:])
 }
 
-// parseRev extracts the generation number from a rev string.  Returns 0 for
+// parseGen extracts the generation number from a rev string.  Returns 0 for
 // malformed input.
 func parseGen(rev string) int {
 	if rev == "" {

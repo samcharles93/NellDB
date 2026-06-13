@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	const count = 1_000_000 
+	const count = 1_000_000
 	const batchSize = 1000
 	const dbPath = "bench_persistent.db"
 
@@ -32,14 +32,14 @@ func main() {
 
 	fmt.Printf("▸ Starting Persistent benchmark: %d rows in batches of %d\n", count, batchSize)
 	fmt.Printf("  Database path: %s\n", dbPath)
-	
+
 	start := time.Now()
 	var memBefore runtime.MemStats
 	runtime.ReadMemStats(&memBefore)
 
 	for i := 0; i < count; i += batchSize {
 		batch := make([]sdk.Doc, batchSize)
-		for j := 0; j < batchSize; j++ {
+		for j := range batchSize {
 			id := i + j
 			batch[j] = sdk.Doc{
 				sdk.FieldID: fmt.Sprintf("doc:%07d", id),
@@ -76,7 +76,7 @@ func main() {
 	// Re-open performance test (Recovery)
 	fmt.Println("\n▸ Testing Recovery Performance (closing and re-opening)...")
 	store.Close()
-	
+
 	recoverStart := time.Now()
 	store2, err := logstore.OpenLog(dbPath, "benchmark-node-persistent")
 	if err != nil {
@@ -84,7 +84,7 @@ func main() {
 	}
 	defer store2.Close()
 	recoverTime := time.Now().Sub(recoverStart)
-	
+
 	fmt.Printf("  Recovery Time: %v (%.1f docs/s)\n", recoverTime, float64(count)/recoverTime.Seconds())
 
 	// Range Scan Test

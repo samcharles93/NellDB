@@ -230,12 +230,10 @@ func TestLogStoreConcurrentPutAndGetChangesSince(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 20 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, _ = ls.PutLocal(&nell.Record{ID: "churn", Type: nell.TypeText, Payload: []byte("x")})
 			_, _ = ls.GetChangesSince(nell.HLC{})
-		}()
+		})
 	}
 	wg.Wait()
 

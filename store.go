@@ -53,9 +53,10 @@ func (kv KnowledgeVector) Update(nodeID string, clock HLC) {
 // MarshalBinary encodes the KnowledgeVector into a compact binary format.
 // [2 bytes: number of entries]
 // For each entry:
-//   [2 bytes: nodeID len]
-//   [N bytes: nodeID string]
-//   [12 bytes: HLC clock]
+//
+//	[2 bytes: nodeID len]
+//	[N bytes: nodeID string]
+//	[12 bytes: HLC clock]
 func (kv KnowledgeVector) MarshalBinary() ([]byte, error) {
 	size := 2
 	for nodeID := range kv {
@@ -85,7 +86,7 @@ func (kv KnowledgeVector) UnmarshalBinary(b []byte) error {
 	count := int(binary.BigEndian.Uint16(b[0:2]))
 	off := 2
 
-	for i := 0; i < count; i++ {
+	for i := range count {
 		if len(b) < off+2 {
 			return fmt.Errorf("kv: truncated at entry %d", i)
 		}
@@ -313,15 +314,12 @@ func (s *MemoryStore) SearchSimilar(collection string, queryVector []float32, li
 	chunkSize := (len(candidates) + numWorkers - 1) / numWorkers
 	var wg sync.WaitGroup
 
-	for w := 0; w < numWorkers; w++ {
+	for w := range numWorkers {
 		start := w * chunkSize
 		if start >= len(candidates) {
 			break
 		}
-		end := start + chunkSize
-		if end > len(candidates) {
-			end = len(candidates)
-		}
+		end := min(start+chunkSize, len(candidates))
 
 		wg.Add(1)
 		go func(chunk []Record) {
@@ -367,4 +365,3 @@ func (s *MemoryStore) SearchSimilar(collection string, queryVector []float32, li
 
 // Close is a no-op for MemoryStore (satisfies Store interface).
 func (s *MemoryStore) Close() error { return nil }
-

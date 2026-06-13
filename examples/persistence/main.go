@@ -63,7 +63,7 @@ func main() {
 	}
 
 	fmt.Printf("▸ Successfully recovered document: %v\n", doc)
-	
+
 	info := reopenedDB.Info()
 	fmt.Printf("▸ Final DB Info: %+v\n", info)
 }

@@ -11,14 +11,13 @@ package server
 
 import (
 	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/samcharles93/NellDB"
 )
 
 // DefaultMaxSkew is the allowed clock drift for HMAC timestamps.
@@ -68,7 +67,7 @@ func HMACAuth(secret []byte) func(http.Handler) http.Handler {
 			}
 			_ = r.Body.Close()
 
-			want := signBody(secret, ts, body)
+			want := nell.SignBody(secret, ts, body)
 			if !hmac.Equal([]byte(want), []byte(sigStr)) {
 				log.Printf("[auth] bad signature from %s for %s %s", r.RemoteAddr, r.Method, r.URL.Path)
 				writeJSON(w, http.StatusUnauthorized, map[string]any{
@@ -101,13 +100,7 @@ func (r *bodyReader) Read(p []byte) (int, error) {
 }
 
 // SignBody computes the HMAC-SHA256 of (timestamp + "\n" + body), hex-encoded.
+// Deprecated: use nell.SignBody directly.
 func SignBody(secret []byte, timestamp int64, body []byte) string {
-	return signBody(secret, timestamp, body)
-}
-
-func signBody(secret []byte, timestamp int64, body []byte) string {
-	mac := hmac.New(sha256.New, secret)
-	_, _ = fmt.Fprintf(mac, "%d\n", timestamp)
-	mac.Write(body)
-	return hex.EncodeToString(mac.Sum(nil))
+	return nell.SignBody(secret, timestamp, body)
 }

@@ -33,19 +33,19 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	
+
 	// Fast populate server directly through store to bypass SDK overhead
 	clock := nell.NewHLC()
-	for i := 0; i < count; i++ {
+	for i := range count {
 		id := fmt.Sprintf("doc:%07d", i)
-		// Fake a strictly increasing clock by manually bumping WallTime 
+		// Fake a strictly increasing clock by manually bumping WallTime
 		// every few records to ensure we don't just rely on the counter
 		// which might be sensitive to map iteration order.
 		rec := nell.Record{
 			Collection: "benchmark",
 			ID:         id,
 			Type:       nell.TypeText,
-			Payload:    []byte(fmt.Sprintf(`{"_id":%q,"val":%d,"payload":"some-data"}`, id, i)),
+			Payload:    fmt.Appendf(nil, `{"_id":%q,"val":%d,"payload":"some-data"}`, id, i),
 			UpdatedBy:  "server-node",
 			Clock:      nell.HLC{WallTime: clock.WallTime + int64(i), Counter: 0},
 		}
@@ -54,11 +54,10 @@ func main() {
 			log.Fatalf("Server populate failed at %d: %v", i, err)
 		}
 	}
-	
+
 	allOnServer, _ := serverStore.List("benchmark")
 	fmt.Printf("  Server store has %d records\n", len(allOnServer))
 
-	
 	srv := server.New(serverStore, "server-node")
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -74,9 +73,9 @@ func main() {
 
 	// ── 3. Run Sync Benchmark ─────────────────────────────────────────────
 	fmt.Printf("\n▸ Starting Binary Sync Benchmark (Pulling %d rows)...\n", count)
-	
+
 	start := time.Now()
-	
+
 	// Pull until we have everything
 	totalIngested := 0
 	for {
@@ -90,13 +89,13 @@ func main() {
 		}
 		// fmt.Printf("  Progress: %d/%d rows ingested\n", totalIngested, count)
 	}
-	
+
 	elapsed := time.Since(start)
-	
+
 	fmt.Printf("\n▸ Binary Sync Complete\n")
 	fmt.Printf("  Total Time:     %v\n", elapsed)
 	fmt.Printf("  Throughput:     %.1f docs/s\n", float64(totalIngested)/elapsed.Seconds())
-	
+
 	serverFileInfo, _ := os.Stat(dbPathServer)
 	clientFileInfo, _ := os.Stat(dbPathClient)
 	fmt.Printf("  Server DB Size: %.2f MiB\n", float64(serverFileInfo.Size())/1024/1024)

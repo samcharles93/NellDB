@@ -12,7 +12,7 @@ var webUIContent embed.FS
 func WebUIHandler() http.Handler {
 	// We use a custom handler to map the files to the /ui/ path
 	mux := http.NewServeMux()
-	
+
 	// index.html at root
 	mux.HandleFunc("/index.html", func(w http.ResponseWriter, r *http.Request) {
 		b, _ := webUIContent.ReadFile("webui/index.html")
@@ -48,6 +48,6 @@ func WebUIHandler() http.Handler {
 		}
 		http.NotFound(w, r)
 	})
-	
+
 	return mux
 }

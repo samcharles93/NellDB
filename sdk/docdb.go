@@ -399,10 +399,7 @@ func (d *DocDB) AllDocs(ctx context.Context, rng DocRange) (AllDocsResult, error
 	}
 
 	// ── Parallel Range Scan ───────────────────────────────────────────
-	numWorkers := runtime.NumCPU()
-	if numWorkers > 12 {
-		numWorkers = 12
-	}
+	numWorkers := min(runtime.NumCPU(), 12)
 	if len(all) < 10000 { // Don't overhead with parallelism for small sets
 		numWorkers = 1
 	}
@@ -411,15 +408,12 @@ func (d *DocDB) AllDocs(ctx context.Context, rng DocRange) (AllDocsResult, error
 	chunkSize := (len(all) + numWorkers - 1) / numWorkers
 	var wg sync.WaitGroup
 
-	for w := 0; w < numWorkers; w++ {
+	for w := range numWorkers {
 		start := w * chunkSize
 		if start >= len(all) {
 			break
 		}
-		end := start + chunkSize
-		if end > len(all) {
-			end = len(all)
-		}
+		end := min(start+chunkSize, len(all))
 
 		wg.Add(1)
 		go func(chunk []nell.Record) {
@@ -470,7 +464,7 @@ func (d *DocDB) SearchSimilar(ctx context.Context, vector []float32, limit int) 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	
+
 	if limit <= 0 {
 		limit = 10 // Default limit
 	}
@@ -483,13 +477,13 @@ func (d *DocDB) SearchSimilar(ctx context.Context, vector []float32, limit int) 
 	docs := make([]Doc, 0, len(records))
 	for _, rec := range records {
 		doc := joinDoc(rec.ID, rec)
-		
+
 		d.mu.RLock()
 		if rev, ok := d.revs[rec.ID]; ok {
 			doc[FieldRev] = rev
 		}
 		d.mu.RUnlock()
-		
+
 		docs = append(docs, doc)
 	}
 
@@ -512,6 +506,22 @@ func (d *DocDB) makeRow(id string, rec nell.Record, includeDoc bool) DocRow {
 		row.Doc = joinDoc(id, rec)
 	}
 	return row
+}
+
+// listAll returns every record in the collection, including tombstones.
+// Unlike store.List, this is used by the Replicator to push deletions to peers.
+func (d *DocDB) listAll() ([]nell.Record, error) {
+	all, err := d.store.GetChangesSince(nell.HLC{})
+	if err != nil {
+		return nil, err
+	}
+	filtered := all[:0]
+	for _, rec := range all {
+		if rec.Collection == d.collection {
+			filtered = append(filtered, rec)
+		}
+	}
+	return filtered, nil
 }
 
 // ── Info / lifecycle ─────────────────────────────────────────────────────────
@@ -615,7 +625,7 @@ func isDeleted(doc Doc) bool {
 // legacy records that pre-date the rev-in-payload convention.
 func joinDoc(id string, rec nell.Record) Doc {
 	out := Doc{FieldID: id}
-	
+
 	if rec.Type != "" && rec.Type != nell.TypeText {
 		out[FieldType] = rec.Type
 	}

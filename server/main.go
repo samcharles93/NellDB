@@ -33,9 +33,10 @@ type Server struct {
 	store  nell.Store
 	nodeID string
 
-	mu    sync.RWMutex
-	peers map[string]*peerConn // connected WebSocket peers
-	kv    nell.KnowledgeVector
+	mu         sync.RWMutex
+	peers      map[string]*peerConn // connected WebSocket peers
+	kv         nell.KnowledgeVector
+	authSecret []byte // optional HMAC secret for sync endpoint auth
 
 	metrics *Metrics // optional; nil means metrics are disabled
 }
@@ -50,6 +51,13 @@ func New(store nell.Store, nodeID string) *Server {
 	}
 	s.seedKnowledgeVector()
 	return s
+}
+
+// SetAuthSecret configures an HMAC shared secret for authenticating sync
+// requests.  When set, all /sync/* endpoints (including WebSocket) require
+// valid X-Nell-Timestamp and X-Nell-Signature headers.
+func (s *Server) SetAuthSecret(secret []byte) {
+	s.authSecret = secret
 }
 
 // seedKnowledgeVector populates the in-memory knowledge vector from the store
@@ -73,6 +81,23 @@ func (s *Server) seedKnowledgeVector() {
 	s.mu.Unlock()
 }
 
+// listAll returns all records in a collection, including tombstones.
+// Unlike store.List, this includes deleted records so anti-entropy
+// can propagate deletes to peers that missed the original creation.
+func (s *Server) listAll(collection string) ([]nell.Record, error) {
+	all, err := s.store.GetChangesSince(nell.HLC{})
+	if err != nil {
+		return nil, err
+	}
+	filtered := all[:0]
+	for _, rec := range all {
+		if rec.Collection == collection {
+			filtered = append(filtered, rec)
+		}
+	}
+	return filtered, nil
+}
+
 // Handler returns an http.Handler for the server's sync API.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -83,7 +108,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/sync/check", s.handleCheck)
 	mux.HandleFunc("/sync/bin/check", s.handleBinCheck)
 	mux.HandleFunc("/sync/bin/push", s.handleBinPush)
-	mux.HandleFunc("/sync/ws", s.handleWebSocket)
+	// WebSocket: wrap with HMAC auth if configured.
+	var wsHandler http.Handler = http.HandlerFunc(s.handleWebSocket)
+	if len(s.authSecret) > 0 {
+		wsHandler = HMACAuth(s.authSecret)(wsHandler)
+	}
+	mux.Handle("/sync/ws", wsHandler)
 	return requireJSON(mux)
 }
 
@@ -113,7 +143,8 @@ func (s *Server) handleBinCheck(w http.ResponseWriter, r *http.Request) {
 		col = nell.DefaultCollection
 	}
 
-	all, err := s.store.List(col)
+	// Use listAll instead of List so tombstones propagate via anti-entropy.
+	all, err := s.listAll(col)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -182,7 +213,7 @@ func (s *Server) handleBinPush(w http.ResponseWriter, r *http.Request) {
 		s.recordSeen(rec)
 	}
 
-	// Broadcast the newly accepted changes (in memory for now, 
+	// Broadcast the newly accepted changes (in memory for now,
 	// ideally we'd broadcast the raw binary to other WebSocket peers too)
 	// s.broadcast(...) // TODO: optimize broadcast to be binary-native too
 
@@ -338,7 +369,8 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Find records the sender hasn't seen, with pagination.
-	all, err := s.store.List(col)
+	// Use listAll instead of List so tombstones propagate via anti-entropy.
+	all, err := s.listAll(col)
 	if err != nil {
 		logError("handleCheck", "store error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)

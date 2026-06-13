@@ -27,6 +27,7 @@ func main() {
 	dataPath := flag.String("data", "", "path to data file (overrides config)")
 	inMemory := flag.Bool("in-memory", false, "use ephemeral in-memory storage")
 	peersFlag := flag.String("peers", "", "comma-separated peer URLs for anti-entropy mesh")
+	discoveryFlag := flag.Bool("discovery", false, "enable mDNS LAN peer discovery")
 	flag.Parse()
 
 	// Structured JSON logging to stderr.
@@ -90,11 +91,21 @@ func main() {
 	if *peersFlag != "" {
 		peers = strings.Split(*peersFlag, ",")
 	}
-	// Note: MeshManager and AuthSecret logic would go here if needed
-	// For this PoC/Example update, I'll keep it simple or use defaults.
 	pm := server.NewMeshManager(srv, peers, 30*time.Second, nil)
 	if len(peers) > 0 {
 		pm.Start()
+	}
+
+	// ── mDNS Discovery ─────────────────────────────────────────────
+	discoveryEnabled := *discoveryFlag || cfg.Discovery.Enabled
+	discoverer := server.NewMDNSDiscoverer(server.MDNSConfig{
+		Enabled: discoveryEnabled,
+		Port:    cfg.Server.Port,
+		NodeID:  *nodeID,
+	})
+	if err := discoverer.Start(pm.AddPeer); err != nil {
+		slog.Error("failed to start mDNS discovery", "err", err)
+		os.Exit(1)
 	}
 
 	// ── Handler Assembly ─────────────────────────────────────────────
@@ -145,6 +156,7 @@ func main() {
 	<-sigCh
 
 	slog.Info("shutting down...")
+	discoverer.Stop()
 	pm.Stop()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

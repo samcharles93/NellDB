@@ -548,17 +548,61 @@ func TestServerCheckTombstoneIncluded(t *testing.T) {
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&result)
 
-	// Note: handleCheck uses List() which excludes tombstones,
-	// so currently tombstones are NOT returned via check.
-	// This test documents the current behavior.
+	// handleCheck now uses listAll (which includes tombstones),
+	// so tombstones ARE returned via /sync/check for anti-entropy.
 	tombstoneFound := false
 	for _, r := range result.Missing {
 		if r.ID == "dying" && r.Deleted {
 			tombstoneFound = true
+			break
 		}
 	}
-	if tombstoneFound {
-		t.Log("tombstone was returned via check (this is unusual — List excludes deleted)")
+	if !tombstoneFound {
+		t.Error("tombstone should be returned via /sync/check so deletes propagate between servers")
+	}
+}
+
+// TestTombstonePropagationMesh verifies that tombstones propagate between
+// servers via MeshManager reconciliation — a peer that never saw the original
+// record still learns about its deletion.
+func TestTombstonePropagationMesh(t *testing.T) {
+	storeA := nell.NewMemoryStore("a")
+	srvA := New(storeA, "a")
+	tsA := httptest.NewServer(srvA.Handler())
+	defer tsA.Close()
+
+	storeB := nell.NewMemoryStore("b")
+	srvB := New(storeB, "b")
+	tsB := httptest.NewServer(srvB.Handler())
+	defer tsB.Close()
+
+	// Push a live record to server A, then tombstone it.
+	push := func(ts *httptest.Server, recs ...nell.Record) {
+		body, _ := json.Marshal(map[string]any{"changes": recs})
+		resp, err := http.Post(ts.URL+"/sync/push", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+
+	push(tsA, nell.Record{ID: "dying", Type: nell.TypeText, Payload: []byte("alive"), Clock: nell.HLC{WallTime: 1000, Counter: 0}, UpdatedBy: "node-b"})
+	push(tsA, nell.Record{ID: "dying", Type: nell.TypeText, Deleted: true, Clock: nell.HLC{WallTime: 2000, Counter: 0}, UpdatedBy: "node-b"})
+
+	// Server B reconciles with A — should receive both the live record
+	// and the tombstone.
+	pm := NewMeshManager(srvB, nil, time.Minute, nil)
+	if err := pm.ReconcileWithPeer(tsA.URL); err != nil {
+		t.Fatalf("ReconcileWithPeer: %v", err)
+	}
+
+	// Server B should have the record as a tombstone.
+	rec, err := storeB.Get(nell.DefaultCollection, "dying")
+	if err != nil {
+		t.Fatalf("server B missing record after reconcile: %v", err)
+	}
+	if !rec.Deleted {
+		t.Error("server B should have the record as a tombstone (Deleted=true)")
 	}
 }
 
@@ -662,4 +706,109 @@ func TestMeshManagerStartStop(t *testing.T) {
 	pm.Start() // idempotent — should not panic or double-start
 	pm.Stop()
 	pm.Stop() // idempotent
+}
+
+// ── Peer state machine tests ──────────────────────────────────────────────
+
+func TestPeerStateTransitions(t *testing.T) {
+	p := newTrackedPeer("http://peer:9342")
+
+	if p.getState() != StateActive {
+		t.Error("new peer should be active")
+	}
+
+	// Simulate missed pings: Active → Degraded → Dead
+	p.recordMiss(DefaultMaxMissedPings) // missedPings=1 → Degraded
+	if p.getState() != StateDegraded {
+		t.Errorf("after 1 miss: state=%s, want %s", p.getState(), StateDegraded)
+	}
+
+	p.recordMiss(DefaultMaxMissedPings) // missedPings=2 → still Degraded
+	if p.getState() != StateDegraded {
+		t.Errorf("after 2 misses: state=%s, want %s", p.getState(), StateDegraded)
+	}
+
+	p.recordMiss(DefaultMaxMissedPings) // missedPings=3 → Dead
+	if p.getState() != StateDead {
+		t.Errorf("after 3 misses: state=%s, want %s", p.getState(), StateDead)
+	}
+
+	// A successful ping resets to Active
+	p.recordPing()
+	if p.getState() != StateActive {
+		t.Errorf("after ping: state=%s, want %s", p.getState(), StateActive)
+	}
+	if p.MissedPings != 0 {
+		t.Errorf("after ping: missedPings=%d, want 0", p.MissedPings)
+	}
+}
+
+func TestReconcileSkipsDeadPeers(t *testing.T) {
+	storeA := nell.NewMemoryStore("a")
+	srvA := New(storeA, "a")
+	tsA := httptest.NewServer(srvA.Handler())
+	defer tsA.Close()
+
+	storeB := nell.NewMemoryStore("b")
+	srvB := New(storeB, "b")
+
+	pm := NewMeshManager(srvB, []string{tsA.URL}, time.Minute, nil)
+
+	// Manually mark the peer as dead.
+	pm.mu.Lock()
+	p := pm.peers[tsA.URL]
+	pm.mu.Unlock()
+	// Force state to dead by simulating max missed pings.
+	p.recordMiss(DefaultMaxMissedPings)
+	p.recordMiss(DefaultMaxMissedPings)
+	p.recordMiss(DefaultMaxMissedPings)
+	if p.getState() != StateDead {
+		t.Fatalf("peer should be dead, got %s", p.getState())
+	}
+
+	// Push data to server A, then try reconcile — should skip dead peer.
+	push := map[string]any{"changes": []nell.Record{
+		{ID: "doc-1", Type: nell.TypeText, Payload: []byte("data"), Clock: nell.HLC{WallTime: 1000, Counter: 0}, UpdatedBy: "writer"},
+	}}
+	body, _ := json.Marshal(push)
+	_, _ = http.Post(tsA.URL+"/sync/push", "application/json", bytes.NewReader(body))
+
+	// reconcileOne should skip dead peers.
+	err := pm.reconcileOne(tsA.URL)
+	if err == nil {
+		t.Log("reconcileOne on dead peer: expected error (skipped), got nil")
+	}
+
+	// Peers() should not include dead peer.
+	active := pm.Peers()
+	if len(active) != 0 {
+		t.Errorf("expected 0 active peers, got %d: %v", len(active), active)
+	}
+}
+
+func TestPeerHeartbeat(t *testing.T) {
+	srv := New(nell.NewMemoryStore("node"), "node")
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	pm := NewMeshManager(srv, []string{ts.URL}, time.Minute, nil)
+	pm.Start()
+	defer pm.Stop()
+
+	// Wait for at least one heartbeat cycle.
+	time.Sleep(DefaultHeartbeatInterval + 500*time.Millisecond)
+
+	pm.mu.RLock()
+	p, ok := pm.peers[ts.URL]
+	pm.mu.RUnlock()
+	if !ok {
+		t.Fatal("peer not found in tracker")
+	}
+
+	if p.getState() != StateActive {
+		t.Errorf("live peer should be active after heartbeat, got %s", p.getState())
+	}
+	if p.MissedPings != 0 {
+		t.Errorf("live peer should have 0 missed pings, got %d", p.MissedPings)
+	}
 }

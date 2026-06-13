@@ -13,6 +13,7 @@ import (
 	"sort"
 	"sync"
 	"time"
+
 	"github.com/klauspost/compress/zstd"
 	"github.com/samcharles93/NellDB"
 )
@@ -145,31 +146,27 @@ func (ls *LogStore) replay() error {
 	}
 
 	// ── Phase 2: Parallel decompression and unmarshaling ────────────────
-	numWorkers := runtime.NumCPU()
-	if numWorkers > 12 {
-		numWorkers = 12 // Cap at 12 for your i5-12500H
-	}
-	
+	numWorkers := min(runtime.NumCPU(),
+		// Cap at 12 for your i5-12500H
+		12)
+
 	results := make(chan []*nell.Record, numWorkers)
 	errs := make(chan error, numWorkers)
-	
+
 	chunkSize := (len(frames) + numWorkers - 1) / numWorkers
 	var wg sync.WaitGroup
 
-	for w := 0; w < numWorkers; w++ {
+	for w := range numWorkers {
 		start := w * chunkSize
 		if start >= len(frames) {
 			break
 		}
-		end := start + chunkSize
-		if end > len(frames) {
-			end = len(frames)
-		}
+		end := min(start+chunkSize, len(frames))
 
 		wg.Add(1)
 		go func(fRange []frame) {
 			defer wg.Done()
-			
+
 			// Each worker needs its own file handle and decoder
 			wf, err := os.Open(ls.file.Name())
 			if err != nil {
@@ -177,7 +174,7 @@ func (ls *LogStore) replay() error {
 				return
 			}
 			defer wf.Close()
-			
+
 			wdec, _ := zstd.NewReader(nil)
 			defer wdec.Close()
 
@@ -532,15 +529,12 @@ func (ls *LogStore) SearchSimilar(collection string, queryVector []float32, limi
 	chunkSize := (len(candidates) + numWorkers - 1) / numWorkers
 	var wg sync.WaitGroup
 
-	for w := 0; w < numWorkers; w++ {
+	for w := range numWorkers {
 		start := w * chunkSize
 		if start >= len(candidates) {
 			break
 		}
-		end := start + chunkSize
-		if end > len(candidates) {
-			end = len(candidates)
-		}
+		end := min(start+chunkSize, len(candidates))
 
 		wg.Add(1)
 		go func(chunk []nell.Record) {
@@ -566,7 +560,7 @@ func (ls *LogStore) SearchSimilar(collection string, queryVector []float32, limi
 
 	sort.Slice(allScored, func(i, j int) bool {
 		if allScored[i].score == allScored[j].score {
-			return allScored[i].rec.ID < allScored[j].rec.ID 
+			return allScored[i].rec.ID < allScored[j].rec.ID
 		}
 		return allScored[i].score > allScored[j].score
 	})
