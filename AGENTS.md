@@ -41,3 +41,14 @@
 - The changes feed is best-effort, not lossless: `changesHub` drops when subscriber buffers fill, and `DocDB.Changes` only drains what is still buffered on cancellation. Code that needs a complete view should reconcile with `AllDocs`/replication rather than assuming every event is delivered.
 - Treat tests as effectively immutable. Only change a test when it is clearly wrong, and explain that reasoning explicitly; never rewrite tests just to make implementation failures disappear.
 - Some repo docs are aspirational compared with the current implementation. For behavior and invariants, prefer the current code in `types.go`, `store.go`, `logstore/`, `sdk/`, `server/`, `client/`, and the tests over older design prose.
+
+## Workflow & Releases
+
+- **Atomic Fixes**: Always reproduce bugs with a test case before fixing.
+- **Durable Storage**: Any change affecting `logstore/log.go` must be verified with `go test ./logstore/...` (including the offensive/corruption tests).
+- **Tagging**: When finishing a significant task (bug fix, feature, or cleanup), you must:
+  1. Commit the changes with a clear message.
+  2. Push to the remote.
+  3. Create a new semver tag (e.g., `v0.1.11`).
+  4. Push the tag to the remote.
+  5. Update `CHANGELOG.md`.
