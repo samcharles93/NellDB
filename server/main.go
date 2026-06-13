@@ -4,10 +4,13 @@
 package server
 
 import (
+	"encoding/binary"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"maps"
 	"net/http"
+	"sort"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -59,7 +62,7 @@ func (s *Server) seedKnowledgeVector() {
 		return
 	}
 	// Fallback: scan on startup.
-	all, err := s.store.List()
+	all, err := s.store.GetChangesSince(nell.HLC{})
 	if err != nil {
 		return
 	}
@@ -78,8 +81,115 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/sync/pull", s.handlePull)
 	mux.HandleFunc("/sync/push", s.handlePush)
 	mux.HandleFunc("/sync/check", s.handleCheck)
+	mux.HandleFunc("/sync/bin/check", s.handleBinCheck)
+	mux.HandleFunc("/sync/bin/push", s.handleBinPush)
 	mux.HandleFunc("/sync/ws", s.handleWebSocket)
 	return requireJSON(mux)
+}
+
+// ... (other handlers)
+
+// handleBinCheck is the high-performance binary version of handleCheck.
+func (s *Server) handleBinCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 1. Read Knowledge Vector
+	kvBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	kv := make(nell.KnowledgeVector)
+	if err := kv.UnmarshalBinary(kvBytes); err != nil {
+		http.Error(w, "kv unmarshal: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	col := r.URL.Query().Get("col")
+	if col == "" {
+		col = nell.DefaultCollection
+	}
+
+	all, err := s.store.List(col)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Sort by HLC for monotonic progress
+	sort.Slice(all, func(i, j int) bool {
+		return all[j].Clock.GreaterThan(all[i].Clock)
+	})
+
+	// 2. Stream back missing records in binary
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+
+	for _, rec := range all {
+		seen, ok := kv[rec.UpdatedBy]
+		if !ok || rec.Clock.GreaterThan(seen) {
+			recBytes, err := rec.MarshalBinary()
+			if err != nil {
+				continue
+			}
+			var header [4]byte
+			binary.BigEndian.PutUint32(header[:], uint32(len(recBytes)))
+			w.Write(header[:])
+			w.Write(recBytes)
+		}
+	}
+}
+
+// handleBinPush is the high-performance binary version of handlePush.
+func (s *Server) handleBinPush(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	accepted := 0
+	total := 0
+
+	for {
+		var header [4]byte
+		_, err := io.ReadFull(r.Body, header[:])
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+
+		recLen := binary.BigEndian.Uint32(header[:])
+		recBytes := make([]byte, recLen)
+		if _, err := io.ReadFull(r.Body, recBytes); err != nil {
+			break
+		}
+
+		var rec nell.Record
+		if err := rec.UnmarshalBinary(recBytes); err != nil {
+			continue
+		}
+
+		total++
+		ok, _, err := s.store.Put(rec)
+		if err == nil && ok {
+			accepted++
+		}
+		s.recordSeen(rec)
+	}
+
+	// Broadcast the newly accepted changes (in memory for now, 
+	// ideally we'd broadcast the raw binary to other WebSocket peers too)
+	// s.broadcast(...) // TODO: optimize broadcast to be binary-native too
+
+	var resp [4]byte
+	binary.BigEndian.PutUint32(resp[:], uint32(accepted))
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Write(resp[:])
 }
 
 // requireJSON returns middleware that rejects requests without
@@ -89,7 +199,12 @@ func requireJSON(next http.Handler) http.Handler {
 		// Only enforce on POST endpoints.
 		if r.Method == http.MethodPost {
 			ct := r.Header.Get("Content-Type")
-			if ct != "" && ct != "application/json" {
+			// Allow octet-stream for binary endpoints
+			if ct == "application/octet-stream" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if ct != "application/json" {
 				http.Error(w, "unsupported content type", http.StatusUnsupportedMediaType)
 				return
 			}
@@ -124,12 +239,28 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		writeBodyError(w, err)
 		return
 	}
+
+	col := r.URL.Query().Get("col")
+	if col == "" {
+		col = nell.DefaultCollection
+	}
+
 	changes, err := s.store.GetChangesSince(req.Since)
 	if err != nil {
 		logError("handlePull", "store error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+
+	// Filter by collection
+	filtered := make([]nell.Record, 0)
+	for _, rec := range changes {
+		if rec.Collection == col {
+			filtered = append(filtered, rec)
+		}
+	}
+	changes = filtered
+
 	if changes == nil {
 		changes = []nell.Record{}
 	}
@@ -201,13 +332,23 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	col := r.URL.Query().Get("col")
+	if col == "" {
+		col = nell.DefaultCollection
+	}
+
 	// Find records the sender hasn't seen, with pagination.
-	all, err := s.store.List()
+	all, err := s.store.List(col)
 	if err != nil {
 		logError("handleCheck", "store error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+
+	// Sort by HLC so Knowledge Vector progress is monotonic across batches.
+	sort.Slice(all, func(i, j int) bool {
+		return all[j].Clock.GreaterThan(all[i].Clock)
+	})
 
 	limit := clamp(req.Limit, 100, 10000)
 	cursor := req.Cursor
@@ -365,7 +506,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // handleReady is a readiness probe — verifies the store is operational.
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	// A cheap store check: list one record.
-	all, err := s.store.List()
+	all, err := s.store.List(nell.DefaultCollection)
 	if err != nil {
 		slog.Error("readiness check failed", "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
