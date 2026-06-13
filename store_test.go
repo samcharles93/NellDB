@@ -19,7 +19,7 @@ func TestMemoryStorePutGet(t *testing.T) {
 		t.Errorf("UpdatedBy = %q, want test-node", rec.UpdatedBy)
 	}
 
-	got, err := s.Get("doc-1")
+	got, err := s.Get(DefaultCollection, "doc-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func TestMemoryStoreDelete(t *testing.T) {
 
 	_, _ = s.PutLocal(&Record{ID: "doc-1", Type: TypeText, Payload: []byte("hello")})
 
-	del, err := s.Delete("doc-1")
+	del, err := s.Delete(DefaultCollection, "doc-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestMemoryStoreDelete(t *testing.T) {
 		t.Error("record not tombstoned")
 	}
 
-	list, _ := s.List()
+	list, _ := s.List(DefaultCollection)
 	for _, r := range list {
 		if r.ID == "doc-1" {
 			t.Error("deleted record appeared in List")
