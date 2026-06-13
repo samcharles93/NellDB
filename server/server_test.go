@@ -592,7 +592,7 @@ func TestMeshManagerReconcile(t *testing.T) {
 
 	// Server B should now have the records
 	for _, id := range []string{"doc-1", "doc-2"} {
-		if _, err := storeB.Get(id); err != nil {
+		if _, err := storeB.Get(nell.DefaultCollection, id); err != nil {
 			t.Errorf("server B missing %s after reconcile: %v", id, err)
 		}
 	}
@@ -625,7 +625,7 @@ func TestMeshManagerReconcileIdempotent(t *testing.T) {
 	}
 
 	// Verify server B only has 1 record
-	list, _ := storeB.List()
+	list, _ := storeB.List(nell.DefaultCollection)
 	if len(list) != 1 {
 		t.Errorf("expected 1 record after idempotent reconcile, got %d", len(list))
 	}
