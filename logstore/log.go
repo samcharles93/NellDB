@@ -16,11 +16,6 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/samcharles93/NellDB"
 )
-	"github.com/klauspost/compress/zstd"
-	"github.com/samcharles93/NellDB"
-	"github.com/klauspost/compress/zstd"
-	"github.com/samcharles93/NellDB"
-)
 
 // ── Frame format ──────────────────────────────────────────────────────────────
 //
@@ -132,6 +127,10 @@ func (ls *LogStore) replay() error {
 		uncompLen := binary.BigEndian.Uint32(header[0:4])
 		compLen := binary.BigEndian.Uint32(header[4:8])
 
+		if _, err := br.Discard(int(compLen)); err != nil {
+			break
+		}
+
 		frames = append(frames, frame{
 			offset:    offset + 8,
 			compLen:   compLen,
@@ -139,9 +138,6 @@ func (ls *LogStore) replay() error {
 		})
 
 		offset += 8 + int64(compLen)
-		if _, err := br.Discard(int(compLen)); err != nil {
-			break
-		}
 	}
 
 	if len(frames) == 0 {
