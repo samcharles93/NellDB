@@ -87,6 +87,10 @@ const (
 	FieldRev = "_rev"
 	// FieldDeleted is the tombstone marker.  Set by Remove.
 	FieldDeleted = "_deleted"
+	// FieldType discriminates the kind of payload in the underlying Record.
+	FieldType = "_type"
+	// FieldVector holds the float32 array for vector similarity search.
+	FieldVector = "_vector"
 )
 
 // Doc is the user-facing document.  A document is a flat JSON object — _id,
