@@ -14,7 +14,7 @@ const metaClockID = "meta:clock"
 
 // readMetaClock fetches the persisted last-seen clock, if any.
 func (d *DocDB) readMetaClock() (nell.HLC, bool) {
-	rec, err := d.store.Get(metaClockID)
+	rec, err := d.store.Get(d.collection, metaClockID)
 	if err != nil {
 		return nell.HLC{}, false
 	}
@@ -37,11 +37,12 @@ func (d *DocDB) writeMetaClock(c nell.HLC) error {
 	clk := nell.NewHLC()
 	clk.Update(c)
 	rec := nell.Record{
-		ID:        metaClockID,
-		Type:      nell.TypeText,
-		Payload:   payload,
-		Clock:     clk.Tick(),
-		UpdatedBy: d.nodeID,
+		Collection: d.collection,
+		ID:         metaClockID,
+		Type:       nell.TypeText,
+		Payload:    payload,
+		Clock:      clk.Tick(),
+		UpdatedBy:  d.nodeID,
 	}
 	if _, _, err := d.store.Put(rec); err != nil {
 		return fmt.Errorf("sdk: persist clock: %w", err)
