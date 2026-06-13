@@ -5,7 +5,7 @@ package nell
 import (
 	"encoding/json"
 	"fmt"
-	"runtime"
+	"sort"
 	"syscall/js"
 	"time"
 )
@@ -36,9 +36,9 @@ func NewIndexedDBStore() (*IndexedDBStore, error) {
 		return nil, fmt.Errorf("indexedDB is not available in this environment")
 	}
 
-	// Open "NellDB" version 2.  v2 adds the "meta" object store for
-	// nodeID and other SDK bookkeeping.  v1 had only "records".
-	request := jsIndexedDB.Call("open", "NellDB", 2)
+	// Open "NellDB" version 3.  v3 changes "records" to use out-of-line keys
+	// (collection:id string) instead of keyPath: "id".
+	request := jsIndexedDB.Call("open", "NellDB", 3)
 
 	done := make(chan error, 1)
 	var db js.Value
@@ -46,21 +46,28 @@ func NewIndexedDBStore() (*IndexedDBStore, error) {
 	// upgradeHandler is called if the database doesn't exist or version changes.
 	upgradeHandler := js.FuncOf(func(this js.Value, args []js.Value) any {
 		db := args[0].Get("target").Get("result")
+		oldVersion := args[0].Get("oldVersion").Int()
 
-		// Create object store "records" with keyPath: "id"
-		records := db.Call("createObjectStore", "records", map[string]any{
-			"keyPath": "id",
-		})
+		if oldVersion < 3 {
+			if db.Get("objectStoreNames").Call("contains", "records").Bool() {
+				db.Call("deleteObjectStore", "records")
+			}
+			// Create object store "records" WITHOUT keyPath for manual "collection:id" keys.
+			records := db.Call("createObjectStore", "records")
 
-		// Create non-unique index "clock" on clock.wall_time for range queries.
-		// Record struct uses json:"clock" and HLC uses json:"wall_time".
-		records.Call("createIndex", "clock", "clock.wall_time", map[string]any{
-			"unique": false,
-		})
+			// Create non-unique index "clock" on clock.wall_time for range queries.
+			records.Call("createIndex", "clock", "clock.wall_time", map[string]any{
+				"unique": false,
+			})
+		}
 
-		// "meta" object store holds SDK bookkeeping records keyed by
-		// out-of-line string (no keyPath): "node_id" → {value: "uuid"}.
-		db.Call("createObjectStore", "meta")
+		if oldVersion < 2 {
+			// "meta" object store holds SDK bookkeeping records keyed by
+			// out-of-line string (no keyPath): "node_id" → {value: "uuid"}.
+			if !db.Get("objectStoreNames").Call("contains", "meta").Bool() {
+				db.Call("createObjectStore", "meta")
+			}
+		}
 
 		return nil
 	})
@@ -125,25 +132,12 @@ func (s *IndexedDBStore) NodeID() string {
 	return s.nodeID
 }
 
-// waitForJS blocks until done is closed.  Plain `<-done` does not yield
-// to the JS event loop in Go-WASM, so a pending IndexedDB `onsuccess`
-// callback would never fire and the goroutine would sit forever.  The
-// fix is to spin on runtime.Gosched() until the callback closes the
-// channel.  Gosched is the WASM shim's documented yield point: when
-// the scheduler finds no runnable goroutine, the shim schedules a
-// setTimeout(0) and returns to JS, which pumps the event loop and
-// dispatches the pending callback.  The callback closes the channel,
-// the waiting goroutine becomes runnable, and the next Gosched picks
-// it up.
+// waitForJS blocks until done is closed.  When called from a goroutine
+// that was triggered by a JS Promise (as in nellPut/nellGet), blocking
+// on the channel allows the Go scheduler to yield to the JS event loop,
+// enabling IndexedDB callbacks to fire.
 func waitForJS(done chan struct{}) {
-	for {
-		select {
-		case <-done:
-			return
-		default:
-			runtime.Gosched()
-		}
-	}
+	<-done
 }
 
 // resolveOrCreateNodeID reads the persistent node ID from the "meta"
@@ -182,7 +176,7 @@ func resolveOrCreateNodeID(db js.Value) (string, error) {
 
 	readReq.Set("onsuccess", readOnSuccess)
 	readReq.Set("onerror", readOnError)
-	<-readDone
+	waitForJS(readDone)
 
 	if readErr != nil {
 		return "", readErr
@@ -232,7 +226,7 @@ func resolveOrCreateNodeID(db js.Value) (string, error) {
 
 	writeReq.Set("onsuccess", writeOnSuccess)
 	writeReq.Set("onerror", writeOnError)
-	<-writeDone
+	waitForJS(writeDone)
 
 	if writeErr != nil {
 		return "", writeErr
@@ -240,10 +234,15 @@ func resolveOrCreateNodeID(db js.Value) (string, error) {
 	return newID, nil
 }
 
-// ── Store Interface Stubs ───────────────────────────────────────────────────
+
+// ── Store Interface implementation ──────────────────────────────────────────
 
 func (s *IndexedDBStore) Put(incoming Record) (bool, Record, error) {
-	local, getErr := s.Get(incoming.ID)
+	if incoming.Collection == "" {
+		incoming.Collection = DefaultCollection
+	}
+
+	local, getErr := s.Get(incoming.Collection, incoming.ID)
 	winner := &incoming
 	if getErr == nil {
 		winner = ResolveConflict(&local, &incoming)
@@ -263,7 +262,9 @@ func (s *IndexedDBStore) Put(incoming Record) (bool, Record, error) {
 
 	txn := s.db.Call("transaction", []any{"records"}, "readwrite")
 	store := txn.Call("objectStore", "records")
-	request := store.Call("put", jsObj)
+	
+	key := winner.Collection + ":" + winner.ID
+	request := store.Call("put", jsObj, key)
 
 	done := make(chan struct{})
 	var putErr error
@@ -284,26 +285,31 @@ func (s *IndexedDBStore) Put(incoming Record) (bool, Record, error) {
 	request.Set("onsuccess", onsuccess)
 	request.Set("onerror", onerror)
 
-	waitForJS(done)
+	<-done
 
 	if putErr != nil {
 		return false, Record{}, putErr
 	}
 
 	return winner == &incoming, *winner, nil
-}
+	}
 
-func (s *IndexedDBStore) Get(id string) (Record, error) {
+	func (s *IndexedDBStore) Get(collection, id string) (Record, error) {
+	if collection == "" {
+		collection = DefaultCollection
+	}
+
 	txn := s.db.Call("transaction", []any{"records"}, "readonly")
 	store := txn.Call("objectStore", "records")
-	request := store.Call("get", id)
+
+	key := collection + ":" + id
+	request := store.Call("get", key)
 
 	done := make(chan struct{})
 	var result js.Value
 	var err error
 
 	onsuccess := js.FuncOf(func(this js.Value, args []js.Value) any {
-		js.Global().Get("console").Call("log", "[get] onsuccess")
 		result = args[0].Get("target").Get("result")
 		close(done)
 		return nil
@@ -311,7 +317,6 @@ func (s *IndexedDBStore) Get(id string) (Record, error) {
 	defer onsuccess.Release()
 
 	onerror := js.FuncOf(func(this js.Value, args []js.Value) any {
-		js.Global().Get("console").Call("log", "[get] onerror")
 		errStr := args[0].Get("target").Get("error").Call("toString").String()
 		err = fmt.Errorf("indexedDB get error: %s", errStr)
 		close(done)
@@ -322,7 +327,7 @@ func (s *IndexedDBStore) Get(id string) (Record, error) {
 	request.Set("onsuccess", onsuccess)
 	request.Set("onerror", onerror)
 
-	waitForJS(done)
+	<-done
 
 	if err != nil {
 		return Record{}, err
@@ -339,13 +344,17 @@ func (s *IndexedDBStore) Get(id string) (Record, error) {
 	}
 
 	return rec, nil
-}
+	}
 
-func (s *IndexedDBStore) Delete(id string) (Record, error) {
-	rec, err := s.Get(id)
+	func (s *IndexedDBStore) Delete(collection, id string) (Record, error) {
+	if collection == "" {
+		collection = DefaultCollection
+	}
+
+	rec, err := s.Get(collection, id)
 	if err != nil {
 		if err == ErrRecordNotFound {
-			rec = Record{ID: id}
+			rec = Record{Collection: collection, ID: id}
 		} else {
 			return Record{}, err
 		}
@@ -357,12 +366,19 @@ func (s *IndexedDBStore) Delete(id string) (Record, error) {
 
 	_, winner, err := s.Put(rec)
 	return winner, err
-}
+	}
 
-func (s *IndexedDBStore) List() ([]Record, error) {
+	func (s *IndexedDBStore) List(collection string) ([]Record, error) {
+	if collection == "" {
+		collection = DefaultCollection
+	}
+
 	txn := s.db.Call("transaction", []any{"records"}, "readonly")
 	store := txn.Call("objectStore", "records")
-	request := store.Call("getAll")
+
+	// Optimize: Use a key range to fetch only records for this collection.
+	keyRange := js.Global().Get("IDBKeyRange").Call("bound", collection+":", collection+":\uffff")
+	request := store.Call("getAll", keyRange)
 
 	done := make(chan struct{})
 	var results js.Value
@@ -386,7 +402,7 @@ func (s *IndexedDBStore) List() ([]Record, error) {
 	request.Set("onsuccess", onsuccess)
 	request.Set("onerror", onerror)
 
-	waitForJS(done)
+	<-done
 
 	if err != nil {
 		return nil, err
@@ -407,9 +423,13 @@ func (s *IndexedDBStore) List() ([]Record, error) {
 	}
 
 	return records, nil
-}
+	}
 
-func (s *IndexedDBStore) GetChangesSince(since HLC) ([]Record, error) {
+	func (s *IndexedDBStore) Query(q Query) ([]Record, error) {
+	return s.List(q.Collection)
+	}
+
+	func (s *IndexedDBStore) GetChangesSince(since HLC) ([]Record, error) {
 	txn := s.db.Call("transaction", []any{"records"}, "readonly")
 	store := txn.Call("objectStore", "records")
 	index := store.Call("index", "clock")
@@ -420,16 +440,11 @@ func (s *IndexedDBStore) GetChangesSince(since HLC) ([]Record, error) {
 	done := make(chan struct{})
 	var records []Record
 	var err error
-	var closed bool
 
 	var onsuccess js.Func
 	onsuccess = js.FuncOf(func(this js.Value, args []js.Value) any {
-		if closed {
-			return nil
-		}
 		cursor := args[0].Get("target").Get("result")
 		if cursor.IsNull() || cursor.IsUndefined() {
-			closed = true
 			close(done)
 			return nil
 		}
@@ -439,7 +454,6 @@ func (s *IndexedDBStore) GetChangesSince(since HLC) ([]Record, error) {
 		var rec Record
 		if unmarshalErr := json.Unmarshal([]byte(jsonStr), &rec); unmarshalErr != nil {
 			err = fmt.Errorf("unmarshal record: %w", unmarshalErr)
-			closed = true
 			close(done)
 			return nil
 		}
@@ -451,26 +465,21 @@ func (s *IndexedDBStore) GetChangesSince(since HLC) ([]Record, error) {
 		cursor.Call("continue")
 		return nil
 	})
+	defer onsuccess.Release()
 
 	var onerror js.Func
 	onerror = js.FuncOf(func(this js.Value, args []js.Value) any {
-		if closed {
-			return nil
-		}
 		errStr := args[0].Get("target").Get("error").Call("toString").String()
 		err = fmt.Errorf("open cursor: %s", errStr)
-		closed = true
 		close(done)
 		return nil
 	})
+	defer onerror.Release()
 
 	request.Set("onsuccess", onsuccess)
 	request.Set("onerror", onerror)
 
-	waitForJS(done)
-
-	onsuccess.Release()
-	onerror.Release()
+	<-done
 
 	if err != nil {
 		return nil, err
@@ -478,3 +487,48 @@ func (s *IndexedDBStore) GetChangesSince(since HLC) ([]Record, error) {
 
 	return records, nil
 }
+
+// SearchSimilar finds the top-K records most similar to the given vector
+// using Cosine Similarity.
+func (s *IndexedDBStore) SearchSimilar(collection string, queryVector []float32, limit int) ([]Record, error) {
+	if collection == "" {
+		collection = DefaultCollection
+	}
+
+	all, err := s.List(collection)
+	if err != nil {
+		return nil, err
+	}
+
+	type scoredRecord struct {
+		rec   Record
+		score float32
+	}
+
+	var allScored []scoredRecord
+	for _, r := range all {
+		if !r.Deleted && r.Type == TypeVector && len(r.Vector) > 0 {
+			score := CosineSimilarity(queryVector, r.Vector)
+			allScored = append(allScored, scoredRecord{rec: r, score: score})
+		}
+	}
+
+	sort.Slice(allScored, func(i, j int) bool {
+		if allScored[i].score == allScored[j].score {
+			return allScored[i].rec.ID < allScored[j].rec.ID 
+		}
+		return allScored[i].score > allScored[j].score
+	})
+
+	if limit > 0 && len(allScored) > limit {
+		allScored = allScored[:limit]
+	}
+
+	out := make([]Record, len(allScored))
+	for i, sr := range allScored {
+		out[i] = sr.rec
+	}
+
+	return out, nil
+}
+
