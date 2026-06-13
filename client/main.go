@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"syscall/js"
+	"time"
 
 	"github.com/samcharles93/NellDB"
 	"github.com/samcharles93/NellDB/sdk"
@@ -127,6 +128,9 @@ func registerCallbacks() {
 	}))
 
 	js.Global().Set("nellReady", js.ValueOf(true))
+	js.Global().Set("nellNodeID", js.FuncOf(func(this js.Value, args []js.Value) any {
+		return js.ValueOf(store.NodeID())
+	}))
 }
 
 func errorJSON(msg string) string {
@@ -138,12 +142,17 @@ func main() {
 	ch := make(chan struct{}, 0)
 
 	var err error
-	store, err = nell.NewIndexedDBStore("wasm-client")
+	store, err = nell.NewIndexedDBStore()
 	if err != nil {
 		fmt.Println("Falling back to MemoryStore:", err)
-		store = nell.NewMemoryStore("wasm-client")
+		fallbackID, uuidErr := nell.GenerateUUIDv4()
+		if uuidErr != nil {
+			fmt.Println("Falling back to time-based nodeID:", uuidErr)
+			fallbackID = fmt.Sprintf("wasm-fallback-%d", time.Now().UnixNano())
+		}
+		store = nell.NewMemoryStore(fallbackID)
 	}
-	db = sdk.New(store, "wasm-client")
+	db = sdk.New(store, store.NodeID())
 
 	registerCallbacks()
 	<-ch

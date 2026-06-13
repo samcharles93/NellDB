@@ -17,6 +17,13 @@ type Store interface {
 	Delete(id string) (Record, error)
 	List() ([]Record, error)
 	GetChangesSince(clock HLC) ([]Record, error)
+	// NodeID returns the stable identifier of the local node.  It is
+	// stamped on every locally-originated record (Delete, PutLocal) and
+	// must be unique per node so the engine's LWW tie-break on
+	// UpdatedBy is deterministic.  Backends persist it where possible
+	// (LogStore on disk, IndexedDBStore in the "meta" object store) so
+	// the same nodeID survives restarts.
+	NodeID() string
 	Close() error
 }
 

@@ -5,7 +5,9 @@ package nell
 import (
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"syscall/js"
+	"time"
 )
 
 // IndexedDBStore is a persistent Store implementation for the browser,
@@ -16,16 +18,27 @@ type IndexedDBStore struct {
 	clock  HLC
 }
 
+// indexedDBOpenTimeout caps the time we'll wait for an IDB open() to
+// settle.  If the user denied storage, IndexedDB is broken by a
+// third-party shim, or the database is locked by another tab, the open
+// promise may never resolve without one.
+const indexedDBOpenTimeout = 5 * time.Second
+
 // NewIndexedDBStore opens (and potentially creates/upgrades) the NellDB
-// database in the browser's IndexedDB storage.
-func NewIndexedDBStore(nodeID string) (*IndexedDBStore, error) {
+// database in the browser's IndexedDB storage, then resolves a persistent
+// nodeID from the "meta" object store.  The nodeID is generated as a fresh
+// UUID v4 on first launch and reused on every subsequent launch in the
+// same browser profile, so two WASM clients in the same Obsidian vault
+// share a nodeID and two clients in different browsers do not.
+func NewIndexedDBStore() (*IndexedDBStore, error) {
 	jsIndexedDB := js.Global().Get("indexedDB")
 	if jsIndexedDB.IsUndefined() {
 		return nil, fmt.Errorf("indexedDB is not available in this environment")
 	}
 
-	// Open "NellDB" version 1
-	request := jsIndexedDB.Call("open", "NellDB", 1)
+	// Open "NellDB" version 2.  v2 adds the "meta" object store for
+	// nodeID and other SDK bookkeeping.  v1 had only "records".
+	request := jsIndexedDB.Call("open", "NellDB", 2)
 
 	done := make(chan error, 1)
 	var db js.Value
@@ -35,15 +48,19 @@ func NewIndexedDBStore(nodeID string) (*IndexedDBStore, error) {
 		db := args[0].Get("target").Get("result")
 
 		// Create object store "records" with keyPath: "id"
-		objectStore := db.Call("createObjectStore", "records", map[string]any{
+		records := db.Call("createObjectStore", "records", map[string]any{
 			"keyPath": "id",
 		})
 
 		// Create non-unique index "clock" on clock.wall_time for range queries.
 		// Record struct uses json:"clock" and HLC uses json:"wall_time".
-		objectStore.Call("createIndex", "clock", "clock.wall_time", map[string]any{
+		records.Call("createIndex", "clock", "clock.wall_time", map[string]any{
 			"unique": false,
 		})
+
+		// "meta" object store holds SDK bookkeeping records keyed by
+		// out-of-line string (no keyPath): "node_id" → {value: "uuid"}.
+		db.Call("createObjectStore", "meta")
 
 		return nil
 	})
@@ -64,15 +81,28 @@ func NewIndexedDBStore(nodeID string) (*IndexedDBStore, error) {
 	request.Set("onsuccess", successHandler)
 	request.Set("onerror", errorHandler)
 
-	err := <-done
+	var openErr error
+	select {
+	case openErr = <-done:
+	case <-time.After(indexedDBOpenTimeout):
+		upgradeHandler.Release()
+		successHandler.Release()
+		errorHandler.Release()
+		return nil, fmt.Errorf("indexedDB open timed out after %s", indexedDBOpenTimeout)
+	}
 
 	// Release callbacks as they are no longer needed after the open request finishes.
 	upgradeHandler.Release()
 	successHandler.Release()
 	errorHandler.Release()
 
+	if openErr != nil {
+		return nil, openErr
+	}
+
+	nodeID, err := resolveOrCreateNodeID(db)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolve persistent nodeID: %w", err)
 	}
 
 	return &IndexedDBStore{
@@ -86,6 +116,128 @@ func NewIndexedDBStore(nodeID string) (*IndexedDBStore, error) {
 func (s *IndexedDBStore) Close() error {
 	s.db.Call("close")
 	return nil
+}
+
+// NodeID returns the persistent node identifier resolved at store creation.
+// Stable across reloads (persisted in the "meta" object store) and used as
+// Record.UpdatedBy on locally-originated Delete operations.
+func (s *IndexedDBStore) NodeID() string {
+	return s.nodeID
+}
+
+// waitForJS blocks until done is closed.  Plain `<-done` does not yield
+// to the JS event loop in Go-WASM, so a pending IndexedDB `onsuccess`
+// callback would never fire and the goroutine would sit forever.  The
+// fix is to spin on runtime.Gosched() until the callback closes the
+// channel.  Gosched is the WASM shim's documented yield point: when
+// the scheduler finds no runnable goroutine, the shim schedules a
+// setTimeout(0) and returns to JS, which pumps the event loop and
+// dispatches the pending callback.  The callback closes the channel,
+// the waiting goroutine becomes runnable, and the next Gosched picks
+// it up.
+func waitForJS(done chan struct{}) {
+	for {
+		select {
+		case <-done:
+			return
+		default:
+			runtime.Gosched()
+		}
+	}
+}
+
+// resolveOrCreateNodeID reads the persistent node ID from the "meta"
+// object store, or generates a fresh UUID v4 and persists it on first use.
+// The nodeID survives across reloads because it is written to IndexedDB
+// before the store is returned.
+//
+// Two WASM clients in the same browser profile (e.g. the same Obsidian
+// vault) share a nodeID; two clients in different browsers do not.  This
+// matters for the engine's LWW tie-break, which is deterministic on
+// UpdatedBy only when nodeIDs are unique.
+func resolveOrCreateNodeID(db js.Value) (string, error) {
+	// ── Read existing node_id ─────────────────────────────────────────
+	readTxn := db.Call("transaction", []any{"meta"}, "readonly")
+	meta := readTxn.Call("objectStore", "meta")
+	readReq := meta.Call("get", "node_id")
+
+	readDone := make(chan struct{})
+	var result js.Value
+	var readErr error
+
+	readOnSuccess := js.FuncOf(func(this js.Value, args []js.Value) any {
+		result = args[0].Get("target").Get("result")
+		close(readDone)
+		return nil
+	})
+	defer readOnSuccess.Release()
+
+	readOnError := js.FuncOf(func(this js.Value, args []js.Value) any {
+		errStr := args[0].Get("target").Get("error").Call("toString").String()
+		readErr = fmt.Errorf("read node_id: %s", errStr)
+		close(readDone)
+		return nil
+	})
+	defer readOnError.Release()
+
+	readReq.Set("onsuccess", readOnSuccess)
+	readReq.Set("onerror", readOnError)
+	<-readDone
+
+	if readErr != nil {
+		return "", readErr
+	}
+	if !result.IsNull() && !result.IsUndefined() {
+		jsonStr := js.Global().Get("JSON").Call("stringify", result).String()
+		var stored struct {
+			Value string `json:"value"`
+		}
+		if err := json.Unmarshal([]byte(jsonStr), &stored); err != nil {
+			return "", fmt.Errorf("unmarshal stored node_id: %w", err)
+		}
+		if stored.Value == "" {
+			return "", fmt.Errorf("stored node_id is empty")
+		}
+		return stored.Value, nil
+	}
+
+	// ── No existing nodeID — generate one and persist ────────────────
+	newID, err := GenerateUUIDv4()
+	if err != nil {
+		return "", fmt.Errorf("generate uuid: %w", err)
+	}
+
+	writeTxn := db.Call("transaction", []any{"meta"}, "readwrite")
+	writeStore := writeTxn.Call("objectStore", "meta")
+
+	jsObj := js.Global().Get("JSON").Call("parse", fmt.Sprintf(`{"value":%q}`, newID))
+	writeReq := writeStore.Call("put", jsObj, "node_id")
+
+	writeDone := make(chan struct{})
+	var writeErr error
+
+	writeOnSuccess := js.FuncOf(func(this js.Value, args []js.Value) any {
+		close(writeDone)
+		return nil
+	})
+	defer writeOnSuccess.Release()
+
+	writeOnError := js.FuncOf(func(this js.Value, args []js.Value) any {
+		errStr := args[0].Get("target").Get("error").Call("toString").String()
+		writeErr = fmt.Errorf("write node_id: %s", errStr)
+		close(writeDone)
+		return nil
+	})
+	defer writeOnError.Release()
+
+	writeReq.Set("onsuccess", writeOnSuccess)
+	writeReq.Set("onerror", writeOnError)
+	<-writeDone
+
+	if writeErr != nil {
+		return "", writeErr
+	}
+	return newID, nil
 }
 
 // ── Store Interface Stubs ───────────────────────────────────────────────────
@@ -132,7 +284,7 @@ func (s *IndexedDBStore) Put(incoming Record) (bool, Record, error) {
 	request.Set("onsuccess", onsuccess)
 	request.Set("onerror", onerror)
 
-	<-done
+	waitForJS(done)
 
 	if putErr != nil {
 		return false, Record{}, putErr
@@ -151,6 +303,7 @@ func (s *IndexedDBStore) Get(id string) (Record, error) {
 	var err error
 
 	onsuccess := js.FuncOf(func(this js.Value, args []js.Value) any {
+		js.Global().Get("console").Call("log", "[get] onsuccess")
 		result = args[0].Get("target").Get("result")
 		close(done)
 		return nil
@@ -158,6 +311,7 @@ func (s *IndexedDBStore) Get(id string) (Record, error) {
 	defer onsuccess.Release()
 
 	onerror := js.FuncOf(func(this js.Value, args []js.Value) any {
+		js.Global().Get("console").Call("log", "[get] onerror")
 		errStr := args[0].Get("target").Get("error").Call("toString").String()
 		err = fmt.Errorf("indexedDB get error: %s", errStr)
 		close(done)
@@ -168,7 +322,7 @@ func (s *IndexedDBStore) Get(id string) (Record, error) {
 	request.Set("onsuccess", onsuccess)
 	request.Set("onerror", onerror)
 
-	<-done
+	waitForJS(done)
 
 	if err != nil {
 		return Record{}, err
@@ -232,7 +386,7 @@ func (s *IndexedDBStore) List() ([]Record, error) {
 	request.Set("onsuccess", onsuccess)
 	request.Set("onerror", onerror)
 
-	<-done
+	waitForJS(done)
 
 	if err != nil {
 		return nil, err
@@ -313,7 +467,7 @@ func (s *IndexedDBStore) GetChangesSince(since HLC) ([]Record, error) {
 	request.Set("onsuccess", onsuccess)
 	request.Set("onerror", onerror)
 
-	<-done
+	waitForJS(done)
 
 	onsuccess.Release()
 	onerror.Release()

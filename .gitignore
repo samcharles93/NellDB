@@ -26,6 +26,10 @@ coverage/
 *.swp
 *.swo
 
+# ── Node / npm ──────────────────────────────────────────────────────────────
+node_modules/
+package-lock.json
+
 # ── Binaries ────────────────────────────────────────────────────────────────
 nell-server
 nelldb-server
