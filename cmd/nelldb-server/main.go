@@ -92,9 +92,7 @@ func main() {
 		peers = strings.Split(*peersFlag, ",")
 	}
 	pm := server.NewMeshManager(srv, peers, 30*time.Second, nil)
-	if len(peers) > 0 {
-		pm.Start()
-	}
+	pm.Start() // always start — discovery may populate peers later
 
 	// ── mDNS Discovery ─────────────────────────────────────────────
 	discoveryEnabled := *discoveryFlag || cfg.Discovery.Enabled
