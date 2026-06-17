@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"math/rand"
 	"net/http"
 	"sync"
 	"time"
@@ -41,6 +42,9 @@ type MeshManager struct {
 	stopCh     chan struct{}
 	interval   time.Duration
 	authSecret []byte // HMAC shared secret for signing peer requests
+
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // NewMeshManager creates a mesh manager that calls /sync/check on all active
@@ -58,6 +62,7 @@ func NewMeshManager(srv *Server, peers []string, interval time.Duration, authSec
 		stopCh:     make(chan struct{}),
 		interval:   interval,
 		authSecret: authSecret,
+		ctx:        context.Background(),
 	}
 	for _, url := range peers {
 		pm.peers[url] = newTrackedPeer(url)
@@ -89,7 +94,7 @@ func (pm *MeshManager) Peers() []string {
 	var out []string
 	for _, p := range pm.peers {
 		if p.isActive() {
-			out = append(out, p.URL)
+			out = append(out, p.url)
 		}
 	}
 	return out
@@ -116,6 +121,9 @@ func (pm *MeshManager) Start() {
 	}
 	pm.ticker = time.NewTicker(pm.interval)
 	tickerC := pm.ticker.C // capture before releasing lock
+	if pm.ctx == nil {
+		pm.ctx, pm.cancel = context.WithCancel(context.Background())
+	}
 	pm.mu.Unlock()
 
 	// Anti-entropy loop: reconciles with all active peers each tick.
@@ -133,6 +141,13 @@ func (pm *MeshManager) Start() {
 				active := pm.Peers()
 				if len(active) == 0 {
 					continue
+				}
+				const maxReconcilePerTick = 16
+				if len(active) > maxReconcilePerTick {
+					rand.Shuffle(len(active), func(i, j int) {
+						active[i], active[j] = active[j], active[i]
+					})
+					active = active[:maxReconcilePerTick]
 				}
 				sem := make(chan struct{}, maxConcurrent)
 				for _, peer := range active {
@@ -175,6 +190,10 @@ func (pm *MeshManager) Stop() {
 	}
 	pm.mu.Unlock()
 
+	if pm.cancel != nil {
+		pm.cancel()
+	}
+
 	// Close stopCh to signal all goroutines — both anti-entropy and heartbeat.
 	select {
 	case <-pm.stopCh:
@@ -192,13 +211,9 @@ func (pm *MeshManager) BroadcastMutation(rec nell.Record) {
 }
 
 // ReconcileWithPeer performs a one-shot /sync/check → ingest cycle with
-// peerURL.  The peer is added to the tracking set if not already present.
+// peerURL.  The peer is NOT automatically added to the tracking set; add it
+// first with AddPeer if you want periodic reconciliation.
 func (pm *MeshManager) ReconcileWithPeer(peerURL string) error {
-	pm.mu.Lock()
-	if _, exists := pm.peers[peerURL]; !exists {
-		pm.peers[peerURL] = newTrackedPeer(peerURL)
-	}
-	pm.mu.Unlock()
 	return pm.reconcileOne(peerURL)
 }
 
@@ -226,7 +241,7 @@ func (pm *MeshManager) heartbeatAll() {
 			continue
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(pm.ctx, 2*time.Second)
 		req, err := http.NewRequestWithContext(ctx, http.MethodHead,
 			joinURL(url, "/health"), nil)
 		if err != nil {
@@ -269,7 +284,7 @@ func (pm *MeshManager) reconcileOne(peerURL string) error {
 		return fmt.Errorf("marshal check request: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), pm.client.Timeout)
+	ctx, cancel := context.WithTimeout(pm.ctx, pm.client.Timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
@@ -330,11 +345,11 @@ func (pm *MeshManager) reconcileOne(peerURL string) error {
 			return fmt.Errorf("marshal paginated check: %w", err)
 		}
 
-		ctx2, cancel2 := context.WithTimeout(context.Background(), pm.client.Timeout)
+		ctx2, cancel2 := context.WithTimeout(pm.ctx, pm.client.Timeout)
+		defer cancel2()
 		req2, err := http.NewRequestWithContext(ctx2, http.MethodPost,
 			joinURL(peerURL, "/sync/check"), bytes.NewReader(body2))
 		if err != nil {
-			cancel2()
 			return fmt.Errorf("build paginated request: %w", err)
 		}
 		req2.Header.Set("Content-Type", "application/json")
@@ -345,7 +360,6 @@ func (pm *MeshManager) reconcileOne(peerURL string) error {
 		}
 
 		resp2, err := pm.client.Do(req2)
-		cancel2()
 		if err != nil {
 			return fmt.Errorf("paginated check post: %w", err)
 		}

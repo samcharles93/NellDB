@@ -226,9 +226,13 @@ func TestReplicatorLiveSurvivesServerRestart(t *testing.T) {
 	time.Sleep(100 * time.Millisecond) // server down — Live should back off
 
 	ts2 := newTestServer(storeA, "server")
-	// Re-point the replicator to the new server URL.
-	rep.BaseURL = ts2.URL
 	defer ts2.Close()
+
+	// Stop the live loop, repoint, and restart to avoid data race on BaseURL.
+	stop()
+	rep.BaseURL = ts2.URL
+	stop = rep.Live(ctx, LiveConfig{Interval: 50 * time.Millisecond, BackoffMax: 200 * time.Millisecond})
+	defer stop()
 
 	// Push a record to the new server directly.
 	_, _, _ = storeA.Put(nell.Record{ID: "after-restart", Type: nell.TypeText, Payload: []byte(`{"_rev":"1-xyz","v":1}`), Clock: nell.HLC{WallTime: 9999, Counter: 0}, UpdatedBy: "peer"})

@@ -57,7 +57,9 @@ func New(store nell.Store, nodeID string) *Server {
 // requests.  When set, all /sync/* endpoints (including WebSocket) require
 // valid X-Nell-Timestamp and X-Nell-Signature headers.
 func (s *Server) SetAuthSecret(secret []byte) {
+	s.mu.Lock()
 	s.authSecret = secret
+	s.mu.Unlock()
 }
 
 // seedKnowledgeVector populates the in-memory knowledge vector from the store
@@ -109,9 +111,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/sync/bin/check", s.handleBinCheck)
 	mux.HandleFunc("/sync/bin/push", s.handleBinPush)
 	// WebSocket: wrap with HMAC auth if configured.
+	s.mu.RLock()
+	secret := s.authSecret
+	s.mu.RUnlock()
 	var wsHandler http.Handler = http.HandlerFunc(s.handleWebSocket)
-	if len(s.authSecret) > 0 {
-		wsHandler = HMACAuth(s.authSecret)(wsHandler)
+	if len(secret) > 0 {
+		wsHandler = HMACAuth(secret)(wsHandler)
 	}
 	mux.Handle("/sync/ws", wsHandler)
 	return requireJSON(mux)

@@ -110,6 +110,8 @@ func (d *MDNSDiscoverer) Stop() {
 // browse discovers peers on the local network and forwards them to addPeer.
 func (d *MDNSDiscoverer) browse(addPeer func(string)) {
 	entriesCh := make(chan *mdns.ServiceEntry, 16)
+
+	// Consumer goroutine: drains entries until entriesCh is closed.
 	go func() {
 		for entry := range entriesCh {
 			url := peerURLFromEntry(entry)
@@ -132,9 +134,12 @@ func (d *MDNSDiscoverer) browse(addPeer func(string)) {
 
 	slog.Info("[discovery] mDNS browsing started", "service", d.cfg.ServiceName)
 
-	// mdns.Query blocks until the channel is closed or an error occurs.
-	// We run it in a goroutine and close Entries when stopping.
+	// mdns.Query blocks until the timeout expires or an error occurs.
+	// We run it in a goroutine and wait for it to return before closing entriesCh.
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		if err := mdns.Query(params); err != nil {
 			if !isMulticastErr(err) {
 				slog.Error("[discovery] mDNS browse error", "err", err)
@@ -143,7 +148,8 @@ func (d *MDNSDiscoverer) browse(addPeer func(string)) {
 	}()
 
 	<-d.stopCh
-	close(entriesCh)
+	wg.Wait()        // wait for Query goroutine to return before closing entriesCh
+	close(entriesCh) // safe — no writer remains
 	slog.Info("[discovery] mDNS browsing stopped")
 }
 

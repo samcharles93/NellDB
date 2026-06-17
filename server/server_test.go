@@ -738,8 +738,8 @@ func TestPeerStateTransitions(t *testing.T) {
 	if p.getState() != StateActive {
 		t.Errorf("after ping: state=%s, want %s", p.getState(), StateActive)
 	}
-	if p.MissedPings != 0 {
-		t.Errorf("after ping: missedPings=%d, want 0", p.MissedPings)
+	if p.missedPings != 0 {
+		t.Errorf("after ping: missedPings=%d, want 0", p.missedPings)
 	}
 }
 
@@ -808,7 +808,7 @@ func TestPeerHeartbeat(t *testing.T) {
 	if p.getState() != StateActive {
 		t.Errorf("live peer should be active after heartbeat, got %s", p.getState())
 	}
-	if p.MissedPings != 0 {
-		t.Errorf("live peer should have 0 missed pings, got %d", p.MissedPings)
+	if p.missedPings != 0 {
+		t.Errorf("live peer should have 0 missed pings, got %d", p.missedPings)
 	}
 }

@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"math/rand"
 	"net/http"
@@ -24,9 +26,10 @@ import (
 // resumes incremental pulls.  Live mode runs the same pull loop on a timer,
 // emitting replicated changes on the SDK's changes feed.
 type Replicator struct {
-	DB      *DocDB
-	BaseURL string
-	HTTP    *http.Client
+	DB         *DocDB
+	BaseURL    string
+	HTTP       *http.Client
+	authSecret []byte
 }
 
 // NewReplicator builds a replicator for the given base URL (e.g.
@@ -44,6 +47,7 @@ func NewReplicator(db *DocDB, baseURL string) *Replicator {
 // with the given secret.  The server must be configured with the same secret
 // for the requests to be accepted.  Pass nil to disable signing.
 func (r *Replicator) SetAuthSecret(secret []byte) {
+	r.authSecret = secret
 	if len(secret) == 0 {
 		r.HTTP.Transport = nil
 		return
@@ -299,6 +303,8 @@ func (r *Replicator) LiveWS(ctx context.Context, nodeID string) (stop func()) {
 					return
 				default:
 				}
+			} else {
+				backoff = 2 * time.Second
 			}
 
 			// Reconnect with backoff + jitter.
@@ -333,7 +339,17 @@ func (r *Replicator) runWS(ctx context.Context, nodeID string) error {
 		wsURL = "wss" + wsURL[5:]
 	}
 
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
+	reqHeader := http.Header{}
+	if r.authSecret != nil {
+		ts := time.Now().Unix()
+		sig := nell.SignBody(r.authSecret, ts, nil)
+		reqHeader.Set("X-Nell-Timestamp", fmt.Sprintf("%d", ts))
+		reqHeader.Set("X-Nell-Signature", sig)
+	}
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+	}
+	conn, _, err := dialer.DialContext(ctx, wsURL, reqHeader)
 	if err != nil {
 		return err
 	}
@@ -348,6 +364,7 @@ func (r *Replicator) runWS(ctx context.Context, nodeID string) error {
 	go func() {
 		defer close(readDone)
 		for {
+			conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 			var msg struct {
 				Changes []nell.Record `json:"changes"`
 			}
@@ -355,7 +372,9 @@ func (r *Replicator) runWS(ctx context.Context, nodeID string) error {
 				return
 			}
 			for _, rec := range msg.Changes {
-				_ = r.DB.ingestRemote(rec)
+				if err := r.DB.ingestRemote(rec); err != nil {
+					slog.Warn("livews: ingest remote failed", "id", rec.ID, "err", err)
+				}
 			}
 		}
 	}()
@@ -380,7 +399,17 @@ func (r *Replicator) runWS(ctx context.Context, nodeID string) error {
 				// Build a record from the store for the wire.
 				rec, err := r.DB.store.Get(r.DB.collection, ch.ID)
 				if err != nil {
-					continue
+					if ch.Doc != nil {
+						payload, _ := json.Marshal(ch.Doc)
+						rec = nell.Record{
+							ID:      ch.ID,
+							Deleted: ch.Deleted,
+							Payload: payload,
+						}
+					} else {
+						slog.Warn("livews: dropped local change, store.Get failed", "id", ch.ID, "err", err)
+						continue
+					}
 				}
 				msg := map[string]any{
 					"changes": []nell.Record{rec},
@@ -399,6 +428,7 @@ func (r *Replicator) runWS(ctx context.Context, nodeID string) error {
 	case <-readDone:
 		<-writeDone
 	case <-writeDone:
+		conn.Close()
 		<-readDone
 	}
 	return nil
@@ -428,8 +458,12 @@ func (t *signingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	// Read and sign the body.
 	var bodyBytes []byte
 	if req.Body != nil {
-		bodyBytes, _ = io.ReadAll(req.Body)
+		var err error
+		bodyBytes, err = io.ReadAll(req.Body)
 		req.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read body for signing: %w", err)
+		}
 	}
 	ts := time.Now().Unix()
 	sig := nell.SignBody(t.secret, ts, bodyBytes)
