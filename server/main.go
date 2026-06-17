@@ -83,23 +83,6 @@ func (s *Server) seedKnowledgeVector() {
 	s.mu.Unlock()
 }
 
-// listAll returns all records in a collection, including tombstones.
-// Unlike store.List, this includes deleted records so anti-entropy
-// can propagate deletes to peers that missed the original creation.
-func (s *Server) listAll(collection string) ([]nell.Record, error) {
-	all, err := s.store.GetChangesSince(nell.HLC{})
-	if err != nil {
-		return nil, err
-	}
-	filtered := all[:0]
-	for _, rec := range all {
-		if rec.Collection == collection {
-			filtered = append(filtered, rec)
-		}
-	}
-	return filtered, nil
-}
-
 // Handler returns an http.Handler for the server's sync API.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -148,8 +131,8 @@ func (s *Server) handleBinCheck(w http.ResponseWriter, r *http.Request) {
 		col = nell.DefaultCollection
 	}
 
-	// Use listAll instead of List so tombstones propagate via anti-entropy.
-	all, err := s.listAll(col)
+	// Use ListAll instead of List so tombstones propagate via anti-entropy.
+	all, err := s.store.ListAll(col)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -374,8 +357,8 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Find records the sender hasn't seen, with pagination.
-	// Use listAll instead of List so tombstones propagate via anti-entropy.
-	all, err := s.listAll(col)
+	// Use ListAll instead of List so tombstones propagate via anti-entropy.
+	all, err := s.store.ListAll(col)
 	if err != nil {
 		logError("handleCheck", "store error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)

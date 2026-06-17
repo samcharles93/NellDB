@@ -508,21 +508,6 @@ func (d *DocDB) makeRow(id string, rec nell.Record, includeDoc bool) DocRow {
 	return row
 }
 
-// listAll returns every record in the collection, including tombstones.
-// Unlike store.List, this is used by the Replicator to push deletions to peers.
-func (d *DocDB) listAll() ([]nell.Record, error) {
-	all, err := d.store.GetChangesSince(nell.HLC{})
-	if err != nil {
-		return nil, err
-	}
-	filtered := all[:0]
-	for _, rec := range all {
-		if rec.Collection == d.collection {
-			filtered = append(filtered, rec)
-		}
-	}
-	return filtered, nil
-}
 
 // ── Info / lifecycle ─────────────────────────────────────────────────────────
 

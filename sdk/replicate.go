@@ -137,7 +137,7 @@ func (r *Replicator) Pull(ctx context.Context) (int, error) {
 // current collection, including tombstones, using the high-performance
 // binary protocol so peers learn about deletions.
 func (r *Replicator) Push(ctx context.Context) (int, error) {
-	all, err := r.DB.listAll()
+	all, err := r.DB.store.ListAll(r.DB.collection)
 	if err != nil {
 		return 0, fmt.Errorf("replicate push list: %w", err)
 	}

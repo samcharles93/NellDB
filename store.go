@@ -24,6 +24,7 @@ type Store interface {
 	Get(collection, id string) (Record, error)
 	Delete(collection, id string) (Record, error)
 	List(collection string) ([]Record, error)
+	ListAll(collection string) ([]Record, error) // includes tombstones
 	Query(q Query) ([]Record, error)
 	GetChangesSince(clock HLC) ([]Record, error)
 	SearchSimilar(collection string, vector []float32, limit int) ([]Record, error)
@@ -254,6 +255,23 @@ func (s *MemoryStore) List(collection string) ([]Record, error) {
 	var out []Record
 	for _, r := range s.records {
 		if r.Collection == collection && !r.Deleted {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// ListAll returns all records in the collection, including tombstones.
+// Used by anti-entropy and replication to propagate deletions.
+func (s *MemoryStore) ListAll(collection string) ([]Record, error) {
+	if collection == "" {
+		collection = DefaultCollection
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []Record
+	for _, r := range s.records {
+		if r.Collection == collection {
 			out = append(out, r)
 		}
 	}

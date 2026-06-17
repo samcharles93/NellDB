@@ -60,7 +60,7 @@ func TestTombstonePropagatesToEmptyPeer(t *testing.T) {
 // deleted records while store.List does not.
 func TestTombstoneListAllIncludesDeleted(t *testing.T) {
 	store := nell.NewMemoryStore("test")
-	srv := New(store, "test")
+	_ = New(store, "test") // server creation for side effects (KV seeding)
 
 	// Insert live + deleted
 	store.PutLocal(&nell.Record{ID: "live", Collection: nell.DefaultCollection, Type: nell.TypeText, Payload: []byte("ok"), Clock: nell.HLC{WallTime: 1, Counter: 0}, UpdatedBy: "test"})
@@ -74,8 +74,8 @@ func TestTombstoneListAllIncludesDeleted(t *testing.T) {
 		}
 	}
 
-	// srv.listAll includes tombstones
-	all, err := srv.listAll(nell.DefaultCollection)
+	// store.ListAll includes tombstones
+	all, err := store.ListAll(nell.DefaultCollection)
 	if err != nil {
 		t.Fatal(err)
 	}

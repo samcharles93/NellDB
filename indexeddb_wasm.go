@@ -424,6 +424,61 @@ func (s *IndexedDBStore) List(collection string) ([]Record, error) {
 	return records, nil
 }
 
+// ListAll returns all records in the collection, including tombstones.
+func (s *IndexedDBStore) ListAll(collection string) ([]Record, error) {
+	if collection == "" {
+		collection = DefaultCollection
+	}
+
+	txn := s.db.Call("transaction", []any{"records"}, "readonly")
+	store := txn.Call("objectStore", "records")
+
+	keyRange := js.Global().Get("IDBKeyRange").Call("bound", collection+":", collection+":￿")
+	request := store.Call("getAll", keyRange)
+
+	done := make(chan struct{})
+	var results js.Value
+	var err error
+
+	onsuccess := js.FuncOf(func(this js.Value, args []js.Value) any {
+		results = args[0].Get("target").Get("result")
+		close(done)
+		return nil
+	})
+	defer onsuccess.Release()
+
+	onerror := js.FuncOf(func(this js.Value, args []js.Value) any {
+		errStr := args[0].Get("target").Get("error").Call("toString").String()
+		err = fmt.Errorf("indexedDB getAll error: %s", errStr)
+		close(done)
+		return nil
+	})
+	defer onerror.Release()
+
+	request.Set("onsuccess", onsuccess)
+	request.Set("onerror", onerror)
+
+	<-done
+
+	if err != nil {
+		return nil, err
+	}
+
+	length := results.Get("length").Int()
+	var records []Record
+	for i := range length {
+		item := results.Index(i)
+		jsonStr := js.Global().Get("JSON").Call("stringify", item).String()
+		var rec Record
+		if err := json.Unmarshal([]byte(jsonStr), &rec); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal record at index %d: %w", i, err)
+		}
+		records = append(records, rec) // includes tombstones
+	}
+
+	return records, nil
+}
+
 func (s *IndexedDBStore) Query(q Query) ([]Record, error) {
 	return s.List(q.Collection)
 }

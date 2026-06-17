@@ -344,6 +344,22 @@ func (ls *LogStore) List(collection string) ([]nell.Record, error) {
 	return out, nil
 }
 
+// ListAll returns all records in the collection, including tombstones.
+func (ls *LogStore) ListAll(collection string) ([]nell.Record, error) {
+	if collection == "" {
+		collection = nell.DefaultCollection
+	}
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	var out []nell.Record
+	for _, r := range ls.records {
+		if r.Collection == collection {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
 func (ls *LogStore) Query(q nell.Query) ([]nell.Record, error) {
 	return ls.List(q.Collection)
 }
