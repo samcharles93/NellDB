@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -30,6 +31,12 @@ type Replicator struct {
 	BaseURL    string
 	HTTP       *http.Client
 	authSecret []byte
+
+	// Health tracking
+	lastPushUnix atomic.Int64
+	lastPullUnix atomic.Int64
+	pushErrors    atomic.Int64
+	pullErrors    atomic.Int64
 }
 
 // NewReplicator builds a replicator for the given base URL (e.g.
@@ -61,6 +68,16 @@ func (r *Replicator) SetAuthSecret(secret []byte) {
 // Pull fetches every record the server has that we have not yet seen,
 // using the high-performance binary protocol.
 func (r *Replicator) Pull(ctx context.Context) (int, error) {
+	n, err := r.pull(ctx)
+	if err != nil {
+		r.pullErrors.Add(1)
+	} else {
+		r.lastPullUnix.Store(time.Now().Unix())
+	}
+	return n, err
+}
+
+func (r *Replicator) pull(ctx context.Context) (int, error) {
 	r.DB.mu.RLock()
 	vector := make(nell.KnowledgeVector, len(r.DB.vector))
 	maps.Copy(vector, r.DB.vector)
@@ -137,6 +154,16 @@ func (r *Replicator) Pull(ctx context.Context) (int, error) {
 // current collection, including tombstones, using the high-performance
 // binary protocol so peers learn about deletions.
 func (r *Replicator) Push(ctx context.Context) (int, error) {
+	n, err := r.push(ctx)
+	if err != nil {
+		r.pushErrors.Add(1)
+	} else {
+		r.lastPushUnix.Store(time.Now().Unix())
+	}
+	return n, err
+}
+
+func (r *Replicator) push(ctx context.Context) (int, error) {
 	all, err := r.DB.store.ListAll(r.DB.collection)
 	if err != nil {
 		return 0, fmt.Errorf("replicate push list: %w", err)
@@ -213,6 +240,26 @@ func (r *Replicator) Sync(ctx context.Context) (pushed, pulled int, err error) {
 	}
 	pulled, err = r.Pull(ctx)
 	return pushed, pulled, err
+}
+
+// Health returns a snapshot of replication health for the /health endpoint.
+func (r *Replicator) Health() nell.SyncHealth {
+	lastPullUnix := r.lastPullUnix.Load()
+	lastPushUnix := r.lastPushUnix.Load()
+	lastPull := time.Unix(lastPullUnix, 0)
+	lastPush := time.Unix(lastPushUnix, 0)
+	lag := 0.0
+	if lastPullUnix > 0 {
+		lag = time.Since(lastPull).Seconds()
+	}
+	return nell.SyncHealth{
+		LastPush:           lastPush,
+		LastPull:           lastPull,
+		ReplicationLagSecs: lag,
+		PushErrors:         r.pushErrors.Load(),
+		PullErrors:         r.pullErrors.Load(),
+		Replicating:        true,
+	}
 }
 
 // LiveConfig configures a Live replication loop.

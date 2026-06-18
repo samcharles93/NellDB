@@ -4,9 +4,11 @@ package logstore
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"os"
 	"runtime"
@@ -600,6 +602,39 @@ func (ls *LogStore) Close() error {
 		return err
 	}
 	return ls.file.Close()
+}
+
+// StartCompaction runs Compact on a ticker in a background goroutine.
+// Returns a stop function; call it to shut down the compaction loop.
+func (ls *LogStore) StartCompaction(ctx context.Context, interval, tombstoneTTL time.Duration) (stop func()) {
+	ticker := time.NewTicker(interval)
+	done := make(chan struct{})
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				slog.Info("compaction loop stopped")
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				n, err := ls.Compact(tombstoneTTL)
+				if err != nil {
+					slog.Error("compaction failed", "err", err)
+				} else {
+					slog.Info("compaction complete", "records_kept", n)
+				}
+			}
+		}
+	}()
+	return func() {
+		select {
+		case <-done:
+		default:
+			close(done)
+		}
+	}
 }
 
 // ── frame I/O ─────────────────────────────────────────────────────────────────

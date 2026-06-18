@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/samcharles93/NellDB"
@@ -45,6 +46,12 @@ type MeshManager struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// Health tracking
+	lastPushUnix atomic.Int64
+	lastPullUnix atomic.Int64
+	pushErrors    atomic.Int64
+	pullErrors    atomic.Int64
 }
 
 // NewMeshManager creates a mesh manager that calls /sync/check on all active
@@ -265,7 +272,7 @@ func (pm *MeshManager) heartbeatAll() {
 
 // ── Reconciliation logic ─────────────────────────────────────────────────
 
-func (pm *MeshManager) reconcileOne(peerURL string) error {
+func (pm *MeshManager) reconcileOneInner(peerURL string) error {
 	// Skip peers that are not active (degraded or dead).
 	pm.mu.RLock()
 	p, ok := pm.peers[peerURL]
@@ -395,6 +402,52 @@ func (pm *MeshManager) reconcileOne(peerURL string) error {
 		slog.Info("[peer-mgr] got missing records", "count", ingested, "peer", peerURL)
 	}
 	return nil
+}
+
+// reconcileOne wraps reconcileOneInner with health tracking.
+func (pm *MeshManager) reconcileOne(peerURL string) (err error) {
+	err = pm.reconcileOneInner(peerURL)
+	if err != nil {
+		pm.pullErrors.Add(1)
+	} else {
+		now := time.Now().Unix()
+		pm.lastPullUnix.Store(now)
+		pm.lastPushUnix.Store(now)
+	}
+	return err
+}
+
+// Health returns a snapshot of replication health.
+func (pm *MeshManager) Health() nell.SyncHealth {
+	pm.mu.RLock()
+	total := len(pm.peers)
+	var active int
+	for _, p := range pm.peers {
+		if p.isActive() {
+			active++
+		}
+	}
+	pm.mu.RUnlock()
+
+	lastPullUnix := pm.lastPullUnix.Load()
+	lastPushUnix := pm.lastPushUnix.Load()
+	lastPull := time.Unix(lastPullUnix, 0)
+	lastPush := time.Unix(lastPushUnix, 0)
+	lag := 0.0
+	if lastPullUnix > 0 {
+		lag = time.Since(lastPull).Seconds()
+	}
+
+	return nell.SyncHealth{
+		LastPush:           lastPush,
+		LastPull:           lastPull,
+		ReplicationLagSecs: lag,
+		PushErrors:         pm.pushErrors.Load(),
+		PullErrors:         pm.pullErrors.Load(),
+		PeersActive:        active,
+		PeersTotal:         total,
+		Replicating:        total > 0,
+	}
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────

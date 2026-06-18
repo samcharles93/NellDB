@@ -28,6 +28,9 @@ func main() {
 	inMemory := flag.Bool("in-memory", false, "use ephemeral in-memory storage")
 	peersFlag := flag.String("peers", "", "comma-separated peer URLs for anti-entropy mesh")
 	discoveryFlag := flag.Bool("discovery", false, "enable mDNS LAN peer discovery")
+	authSecret := flag.String("auth-secret", "", "HMAC shared secret for sync endpoint auth")
+	tlsCert := flag.String("tls-cert", "", "TLS certificate file path")
+	tlsKey := flag.String("tls-key", "", "TLS private key file path")
 	flag.Parse()
 
 	// Structured JSON logging to stderr.
@@ -63,6 +66,7 @@ func main() {
 
 	// 4. Initialize Store
 	var s nell.Store
+	var stopCompaction func()
 	var err error
 	if *inMemory {
 		s = nell.NewMemoryStore(*nodeID)
@@ -76,7 +80,21 @@ func main() {
 		defer func() { _ = s.Close() }()
 	}
 
+	// Type-assert to LogStore for auto-compaction.
+	if ls, ok := s.(*logstore.LogStore); ok {
+		interval := time.Duration(cfg.Compaction.IntervalMinutes) * time.Minute
+		ttl := time.Duration(cfg.Compaction.TombstoneTTLHours) * time.Hour
+		stopCompaction = ls.StartCompaction(context.Background(), interval, ttl)
+		slog.Info("auto-compaction enabled", "interval_minutes", cfg.Compaction.IntervalMinutes, "tombstone_ttl_hours", cfg.Compaction.TombstoneTTLHours)
+	}
+
 	srv := server.New(s, *nodeID)
+
+	// ── Auth secret ─────────────────────────────────────────────────────
+	if *authSecret != "" {
+		srv.SetAuthSecret([]byte(*authSecret))
+		slog.Info("HMAC auth enabled for sync endpoints")
+	}
 
 	// ── Metrics ──────────────────────────────────────────────────────
 	m, err := server.NewMetrics()
@@ -91,7 +109,9 @@ func main() {
 	if *peersFlag != "" {
 		peers = strings.Split(*peersFlag, ",")
 	}
-	pm := server.NewMeshManager(srv, peers, 30*time.Second, nil)
+	peers = append(peers, cfg.Peers...)
+	pm := server.NewMeshManager(srv, peers, 30*time.Second, []byte(*authSecret))
+	srv.SetMeshManager(pm)
 	pm.Start() // always start — discovery may populate peers later
 
 	// ── mDNS Discovery ─────────────────────────────────────────────
@@ -139,10 +159,23 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
+	// Resolve TLS from flags (precedence) then config
+	tlsCertFile, tlsKeyFile := *tlsCert, *tlsKey
+	if tlsCertFile == "" && tlsKeyFile == "" {
+		tlsCertFile, tlsKeyFile = cfg.Server.TLSCert, cfg.Server.TLSKey
+	}
+
 	// Start server
 	go func() {
 		slog.Info("nell-server starting", "node", *nodeID, "addr", *addr, "data", *dataPath)
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		var err error
+		if tlsCertFile != "" && tlsKeyFile != "" {
+			slog.Info("TLS enabled", "cert", tlsCertFile)
+			err = httpSrv.ListenAndServeTLS(tlsCertFile, tlsKeyFile)
+		} else {
+			err = httpSrv.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
 			slog.Error("server error", "err", err)
 			os.Exit(1)
 		}
@@ -154,6 +187,9 @@ func main() {
 	<-sigCh
 
 	slog.Info("shutting down...")
+	if stopCompaction != nil {
+		stopCompaction()
+	}
 	discoverer.Stop()
 	pm.Stop()
 

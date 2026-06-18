@@ -23,6 +23,18 @@ const (
 
 const DefaultCollection = "default"
 
+// SyncHealth is a snapshot of replication health for the /health endpoint.
+type SyncHealth struct {
+	LastPush           time.Time `json:"last_push"`
+	LastPull           time.Time `json:"last_pull"`
+	ReplicationLagSecs float64   `json:"replication_lag_seconds"`
+	PushErrors         int64     `json:"push_errors"`
+	PullErrors         int64     `json:"pull_errors"`
+	PeersActive        int       `json:"peers_active"`
+	PeersTotal         int       `json:"peers_total"`
+	Replicating        bool      `json:"replicating"`
+}
+
 // ── Hybrid Logical Clock ──────────────────────────────────────────────────────
 
 // HLC combines physical wall time with a logical counter to provide causally-

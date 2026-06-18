@@ -38,7 +38,8 @@ type Server struct {
 	kv         nell.KnowledgeVector
 	authSecret []byte // optional HMAC secret for sync endpoint auth
 
-	metrics *Metrics // optional; nil means metrics are disabled
+	metrics     *Metrics     // optional; nil means metrics are disabled
+	meshManager *MeshManager // optional; attached for sync health reporting
 }
 
 // New creates a Server backed by the given Store.
@@ -85,24 +86,28 @@ func (s *Server) seedKnowledgeVector() {
 
 // Handler returns an http.Handler for the server's sync API.
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/ready", s.handleReady)
-	mux.HandleFunc("/sync/pull", s.handlePull)
-	mux.HandleFunc("/sync/push", s.handlePush)
-	mux.HandleFunc("/sync/check", s.handleCheck)
-	mux.HandleFunc("/sync/bin/check", s.handleBinCheck)
-	mux.HandleFunc("/sync/bin/push", s.handleBinPush)
-	// WebSocket: wrap with HMAC auth if configured.
-	s.mu.RLock()
-	secret := s.authSecret
-	s.mu.RUnlock()
-	var wsHandler http.Handler = http.HandlerFunc(s.handleWebSocket)
-	if len(secret) > 0 {
-		wsHandler = HMACAuth(secret)(wsHandler)
+	// Top-level mux for health/ready (no auth — these are health probes).
+	top := http.NewServeMux()
+	top.HandleFunc("/health", s.handleHealth)
+	top.HandleFunc("/ready", s.handleReady)
+
+	// Sync mux with all /sync/* routes.
+	sync := http.NewServeMux()
+	sync.HandleFunc("/sync/pull", s.handlePull)
+	sync.HandleFunc("/sync/push", s.handlePush)
+	sync.HandleFunc("/sync/check", s.handleCheck)
+	sync.HandleFunc("/sync/bin/check", s.handleBinCheck)
+	sync.HandleFunc("/sync/bin/push", s.handleBinPush)
+	sync.HandleFunc("/sync/ws", s.handleWebSocket)
+
+	// Wrap sync routes with HMAC auth if configured.
+	var syncHandler http.Handler = sync
+	if len(s.authSecret) > 0 {
+		syncHandler = HMACAuth(s.authSecret)(sync)
 	}
-	mux.Handle("/sync/ws", wsHandler)
-	return requireJSON(mux)
+	top.Handle("/sync/", syncHandler)
+
+	return requireJSON(top)
 }
 
 // ... (other handlers)
@@ -240,6 +245,9 @@ func (s *Server) ListenAndServe(addr string) error {
 
 // SetMetrics attaches a Metrics instance for recording request-level counters.
 func (s *Server) SetMetrics(m *Metrics) { s.metrics = m }
+
+// SetMeshManager attaches a MeshManager for sync health reporting.
+func (s *Server) SetMeshManager(pm *MeshManager) { s.meshManager = pm }
 
 // ── HTTP Handlers ─────────────────────────────────────────────────────────────
 
@@ -520,7 +528,14 @@ func (s *Server) broadcast(changes []nell.Record) {
 
 // handleHealth is a liveness probe — returns 200 as long as the process is alive.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "node_id": s.nodeID})
+	resp := map[string]any{
+		"status":  "ok",
+		"node_id": s.nodeID,
+	}
+	if s.meshManager != nil {
+		resp["sync"] = s.meshManager.Health()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleReady is a readiness probe — verifies the store is operational.

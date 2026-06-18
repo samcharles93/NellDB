@@ -11,6 +11,8 @@ type Config struct {
 		Port      int    `yaml:"port"`
 		DataDir   string `yaml:"data_dir"`
 		MaxSkewMS int    `yaml:"max_skew_ms"`
+		TLSCert   string `yaml:"tls_cert"`
+		TLSKey    string `yaml:"tls_key"`
 	} `yaml:"server"`
 	Web struct {
 		Enabled bool `yaml:"enabled"`
@@ -18,6 +20,7 @@ type Config struct {
 	Auth struct {
 		JWKSURL                    string `yaml:"jwks_url"`
 		JWKSRefreshIntervalSeconds int    `yaml:"jwks_refresh_interval_seconds"`
+		Secret                     string `yaml:"secret"`
 	} `yaml:"auth"`
 	Sync struct {
 		MaxBatchSize          int `yaml:"max_batch_size"`
@@ -27,8 +30,10 @@ type Config struct {
 		Enabled bool `yaml:"enabled"`
 	} `yaml:"discovery"`
 	Compaction struct {
-		IntervalMinutes int `yaml:"interval_minutes"`
+		IntervalMinutes  int `yaml:"interval_minutes"`
+		TombstoneTTLHours int `yaml:"tombstone_ttl_hours"`
 	} `yaml:"compaction"`
+	Peers []string `yaml:"peers"`
 	Vector struct {
 		EnableHNSW                bool `yaml:"enable_hnsw"`
 		PCADimensions             int  `yaml:"pca_dimensions"`
@@ -40,14 +45,15 @@ type Config struct {
 }
 
 func LoadConfig(path string) (*Config, error) {
-	f, err := os.Open(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+
+	expanded := os.ExpandEnv(string(raw))
 
 	var cfg Config
-	if err := yaml.NewDecoder(f).Decode(&cfg); err != nil {
+	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
@@ -62,6 +68,7 @@ func DefaultConfig() *Config {
 	cfg.Sync.MaxBatchSize = 1000
 	cfg.Sync.StalenessEvictionDays = 14
 	cfg.Compaction.IntervalMinutes = 60
+	cfg.Compaction.TombstoneTTLHours = 168
 	cfg.Vector.EnableHNSW = true
 	cfg.Vector.PCADimensions = 128
 	cfg.Vector.TrainingSampleSize = 5000
