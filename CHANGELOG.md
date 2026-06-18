@@ -1,6 +1,20 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+All notable changes for this project will be documented in this file.
+
+## [v0.2.2] - 2026-06-19
+
+### Added
+- **`OpenLogWithOptions`**: configurable logstore open with `Options{FlushInterval, CompressionLevel}`. `OpenLog` remains the safe default (per-write flush, SpeedDefault zstd) — no silent behaviour change for existing callers.
+- **Group commit**: `Options.FlushInterval > 0` enables a background flush goroutine. Writes return immediately after buffering; the kernel page cache is flushed on the interval. Trades up to `FlushInterval` of writes on a process crash for ~1.5x write throughput. Neither mode calls `fsync` — durability against power loss is a separate concern.
+- **Compression level knob**: `Options.CompressionLevel` selects the Zstd encoder level (Fastest/Default/Better/Best). `SpeedFastest` roughly halves encode time vs `SpeedDefault` at a modest ratio cost.
+- **HLC index for `GetChangesSince`**: the replication hot path is now O(log n + k) via a lazily-rebuilt sorted index instead of a full O(n) scan. Writes mark the index dirty (O(1)); the next query rebuilds it if needed. Measured 2.1x faster at 1K records, 2.8x at 10K, 3.6x at 100K — improvement grows with scale.
+- **`storage` config section**: `flush_interval_ms` and `compression_level` in `nell.yaml` to control group-commit and zstd level from the server binary.
+- **Benchmarks**: `BenchmarkPutLocal`, `BenchmarkPutSequentialSameID` to track write-path regressions.
+
+### Changed
+- `LogStore` struct gains `changesIdx`, `changesDirty`, `flushInterval`, `stopFlush` fields.
+- `cmd/nelldb-server/main.go` uses `OpenLogWithOptions` with config-driven storage options.
 
 ## [v0.2.1] - 2026-06-19
 
