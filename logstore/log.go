@@ -398,39 +398,17 @@ func (ls *LogStore) Compact(tombstoneThreshold time.Duration) (int, error) {
 		return 0, fmt.Errorf("compact: flush: %w", err)
 	}
 
-	// ── Phase 1: scan the log and pick the highest-HLC frame per ID ──────
 	logPath := ls.file.Name()
-	f, err := os.Open(logPath)
-	if err != nil {
-		return 0, fmt.Errorf("compact: open for scan: %w", err)
-	}
 
-	winners := make(map[string]nell.Record)
-	cutoff := time.Now().UnixMilli() - tombstoneThreshold.Milliseconds()
-	br := bufio.NewReader(f)
-
-	for {
-		rec, err := readFrame(br, ls.zdec)
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			break
-		}
-		if err != nil {
-			_ = f.Close()
-			return 0, fmt.Errorf("compact: read frame: %w", err)
-		}
-
-		if rec.Collection == "" {
-			rec.Collection = nell.DefaultCollection
-		}
-		key := rec.Collection + ":" + rec.ID
-		existing, ok := winners[key]
-		if !ok || rec.Clock.GreaterThan(existing.Clock) {
-			winners[key] = *rec
-		}
-	}
-	_ = f.Close()
+	// ── Phase 1: copy in-memory winners ───────────────────────────────────
+	// ls.records already holds the post-LWW winner for every key — it is
+	// updated on every Put — so there is no need to rescan the log file.
+	// Scanning the file would just redo the decompression, unmarshal, and
+	// conflict resolution that the live index already reflects.
+	winners := ls.records
 
 	// ── Phase 2: filter old tombstones ────────────────────────────────────
+	cutoff := time.Now().UnixMilli() - tombstoneThreshold.Milliseconds()
 	keep := make(map[string]nell.Record, len(winners))
 	for key, rec := range winners {
 		if rec.Deleted && rec.Clock.WallTime < cutoff {
@@ -658,32 +636,4 @@ func (ls *LogStore) append(rec nell.Record) error {
 		return fmt.Errorf("write data: %w", err)
 	}
 	return ls.writer.Flush()
-}
-
-func readFrame(r io.Reader, dec *zstd.Decoder) (*nell.Record, error) {
-	var header [8]byte
-	if _, err := io.ReadFull(r, header[:]); err != nil {
-		return nil, err
-	}
-	uncompLen := binary.BigEndian.Uint32(header[0:4])
-	compLen := binary.BigEndian.Uint32(header[4:8])
-
-	compressed := make([]byte, compLen)
-	if _, err := io.ReadFull(r, compressed); err != nil {
-		return nil, err
-	}
-
-	raw, err := dec.DecodeAll(compressed, nil)
-	if err != nil {
-		return nil, fmt.Errorf("zstd decompress: %w", err)
-	}
-	if len(raw) != int(uncompLen) {
-		return nil, fmt.Errorf("length mismatch: declared %d, decoded %d", uncompLen, len(raw))
-	}
-
-	var rec nell.Record
-	if err := rec.UnmarshalBinary(raw); err != nil {
-		return nil, fmt.Errorf("unmarshal binary: %w", err)
-	}
-	return &rec, nil
 }

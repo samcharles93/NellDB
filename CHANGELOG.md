@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.2.1] - 2026-06-19
+
+### Changed
+- **Faster compaction**: `LogStore.Compact` no longer rescans the entire log file. The in-memory `records` map already holds the post-LWW winner for every key (it is updated on every `Put`), so the file scan — which decompressed and unmarshalled every frame only to redo conflict resolution that the live index already reflects — was pure waste. Compaction now iterates `ls.records` directly, turning a Zstd-decompress-and-unmarshal O(n) scan into a plain map copy. The `readFrame` helper, previously only used by compaction, has been removed.
+
 ## [v0.1.11] - 2026-06-13
 
 ### Added
