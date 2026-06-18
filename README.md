@@ -28,6 +28,9 @@ NellDB is storage-agnostic via the `nell.Store` interface.
 
 - **In-memory**: `nell.NewMemoryStore(nodeID)` — ephemeral.
 - **Durable**: `logstore.OpenLog(path, nodeID)` — append-only, Zstd-compressed frame log with parallel replay.
+- **Durable (tunable)**: `logstore.OpenLogWithOptions(path, nodeID, opts)` — configurable flush interval (group commit) and compression level. See [`logstore.Options`](logstore/log.go).
+
+Both `MemoryStore` and `LogStore` maintain collection and HLC secondary indexes so `List`, `ListAll`, and `GetChangesSince` are sublinear in total record count. `IndexedDBStore` (WASM) uses native `IDBKeyRange` queries.
 
 ## Sync
 
@@ -45,9 +48,9 @@ go rep.Live(ctx, 30*time.Second)
 - `server/`: HTTP API and anti-entropy handlers.
 - `client/`: WASM runtime and JS bridge.
 - `cmd/nelldb-server/`: Standalone server binary.
+- `examples/perf/`, `examples/perf-persist/`: In-memory and durable throughput benchmarks.
 
 ## Documentation
 
 - [Technical Design](docs/technical-design.md)
-- [Architecture Decisions (ADRs)](docs/architecture/adrs/)
 - [Project Status](docs/status.md)
