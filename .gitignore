@@ -10,27 +10,31 @@
 /nelldb-server
 /client/wasm_exec.js
 
-# ── Database / log files ────────────────────────────────────────────────────
+# ── Database / log files
 *.db
 *.db.compact
 
-# ── Benchmark artifacts ──────────────────────────────────────────────────────
+# ── Benchmark artifacts
 examples/perf/results.json
 examples/perf-persist/results.json
 
-# ── Test & coverage ──────────────────────────────────────────────────────────
+# ── Test & coverage
 *.test
 *.out
 coverage/
 *.prof
 *.cpu
 
-# ── IDE / editor ─────────────────────────────────────────────────────────────
+# ── IDE / editor
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# ── Node / npm ──────────────────────────────────────────────────────────────
+# ── Node / npm
 node_modules/
 package-lock.json
+
+.superpowers/
+.research/
+
