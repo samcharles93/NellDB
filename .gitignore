@@ -36,5 +36,7 @@ node_modules/
 package-lock.json
 
 .superpowers/
+docs/superpowers/
+docs/adrs/
 .research/
 
