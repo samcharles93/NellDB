@@ -2,6 +2,11 @@
 
 All notable changes for this project will be documented in this file.
 
+## [v0.2.4] - 2026-06-19
+
+### Changed
+- **Collection index + HLC index for `MemoryStore`**: the in-memory store now maintains the same `map[collection]set[key]` and lazily-rebuilt `[]clockKey` indexes as the logstore, bringing `List`/`ListAll` and `GetChangesSince` to O(collection size) / O(log n + k) respectively. This aligns `MemoryStore` with `LogStore` so the server `--in-memory` mode, WASM client fallback, and SDK tests all get the same scan improvements. `IndexedDBStore` already used native `IDBKeyRange` queries and was already optimal. Measured in-memory range scan (10K rows from 1M): 521ms → 241ms (2.2x faster).
+
 ## [v0.2.3] - 2026-06-19
 
 ### Changed

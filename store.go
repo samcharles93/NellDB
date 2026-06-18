@@ -135,16 +135,36 @@ type MemoryStore struct {
 	clock   HLC
 	records map[string]Record
 	kv      KnowledgeVector
+
+	// colIndex maps collection name → set of record keys in that collection.
+	// It backs List/ListAll so they are O(collection size) instead of a full
+	// scan.  Maintained incrementally on every write.
+	colIndex map[string]map[string]struct{}
+
+	// changesIdx is a lazily-rebuilt slice of (clock, key) pairs in ascending
+	// HLC order, backing GetChangesSince so it is O(log n + k) instead of a
+	// full scan.  Writes set changesDirty; the next query rebuilds if needed.
+	changesIdx   []clockKey
+	changesDirty bool
+}
+
+// clockKey is a single entry in the changesIdx: the current winning HLC for a
+// record key, used to binary-search the GetChangesSince lower bound.
+type clockKey struct {
+	clock HLC
+	key   string
 }
 
 // NewMemoryStore returns an initialised MemoryStore with the given node
 // identifier (used as Record.UpdatedBy on every write).
 func NewMemoryStore(nodeID string) *MemoryStore {
 	return &MemoryStore{
-		nodeID:  nodeID,
-		clock:   NewHLC(),
-		records: make(map[string]Record),
-		kv:      make(KnowledgeVector),
+		nodeID:        nodeID,
+		clock:         NewHLC(),
+		records:       make(map[string]Record),
+		kv:            make(KnowledgeVector),
+		colIndex:      make(map[string]map[string]struct{}),
+		changesDirty:  true,
 	}
 }
 
@@ -158,6 +178,44 @@ func (s *MemoryStore) KnowledgeVector() KnowledgeVector {
 	cp := make(KnowledgeVector, len(s.kv))
 	maps.Copy(cp, s.kv)
 	return cp
+}
+
+// indexKey adds key to the collection index for the given collection.  Called
+// under the write lock by every write path.  O(1) amortized.
+func (s *MemoryStore) indexKey(key, collection string) {
+	set, ok := s.colIndex[collection]
+	if !ok {
+		set = make(map[string]struct{})
+		s.colIndex[collection] = set
+	}
+	set[key] = struct{}{}
+}
+
+// markChangesDirty flags the HLC index as stale so the next GetChangesSince
+// rebuilds it.  Called under the write lock by every write path.
+func (s *MemoryStore) markChangesDirty() {
+	s.changesDirty = true
+}
+
+// rebuildChangesIndex rebuilds the sorted (clock, key) slice from the current
+// records map.  Called under the read lock.
+func (s *MemoryStore) rebuildChangesIndex() {
+	idx := make([]clockKey, 0, len(s.records))
+	for key, rec := range s.records {
+		idx = append(idx, clockKey{clock: rec.Clock, key: key})
+	}
+	sort.Slice(idx, func(i, j int) bool {
+		a, b := idx[i].clock, idx[j].clock
+		if a.WallTime != b.WallTime {
+			return a.WallTime < b.WallTime
+		}
+		if a.Counter != b.Counter {
+			return a.Counter < b.Counter
+		}
+		return idx[i].key < idx[j].key
+	})
+	s.changesIdx = idx
+	s.changesDirty = false
 }
 
 // Put inserts or updates a record using LWW conflict resolution.
@@ -176,13 +234,16 @@ func (s *MemoryStore) Put(incoming Record) (bool, Record, error) {
 	local, exists := s.records[key]
 	if !exists {
 		s.records[key] = incoming
+		s.indexKey(key, incoming.Collection)
 		s.kv.Update(incoming.UpdatedBy, incoming.Clock)
+		s.markChangesDirty()
 		return true, incoming, nil
 	}
 
 	winner := ResolveConflict(&local, &incoming)
 	s.records[key] = *winner
 	s.kv.Update(winner.UpdatedBy, winner.Clock)
+	s.markChangesDirty()
 	return winner == &incoming, *winner, nil
 }
 
@@ -201,8 +262,13 @@ func (s *MemoryStore) PutLocal(rec *Record) (Record, error) {
 	rec.UpdatedBy = s.nodeID
 
 	key := rec.Collection + ":" + rec.ID
+	_, existed := s.records[key]
 	s.records[key] = *rec
+	if !existed {
+		s.indexKey(key, rec.Collection)
+	}
 	s.kv.Update(s.nodeID, rec.Clock)
+	s.markChangesDirty()
 	return *rec, nil
 }
 
@@ -241,7 +307,11 @@ func (s *MemoryStore) Delete(collection, id string) (Record, error) {
 	// Keep the existing type so the tombstone travels with the right discriminator.
 
 	s.records[key] = rec
+	if !ok {
+		s.indexKey(key, collection)
+	}
 	s.kv.Update(s.nodeID, rec.Clock)
+	s.markChangesDirty()
 	return rec, nil
 }
 
@@ -252,9 +322,15 @@ func (s *MemoryStore) List(collection string) ([]Record, error) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var out []Record
-	for _, r := range s.records {
-		if r.Collection == collection && !r.Deleted {
+
+	set, ok := s.colIndex[collection]
+	if !ok {
+		return nil, nil
+	}
+	out := make([]Record, 0, len(set))
+	for key := range set {
+		r := s.records[key]
+		if !r.Deleted {
 			out = append(out, r)
 		}
 	}
@@ -269,11 +345,14 @@ func (s *MemoryStore) ListAll(collection string) ([]Record, error) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var out []Record
-	for _, r := range s.records {
-		if r.Collection == collection {
-			out = append(out, r)
-		}
+
+	set, ok := s.colIndex[collection]
+	if !ok {
+		return nil, nil
+	}
+	out := make([]Record, 0, len(set))
+	for key := range set {
+		out = append(out, s.records[key])
 	}
 	return out, nil
 }
@@ -288,11 +367,24 @@ func (s *MemoryStore) Query(q Query) ([]Record, error) {
 func (s *MemoryStore) GetChangesSince(since HLC) ([]Record, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var out []Record
-	for _, r := range s.records {
-		if r.Clock.GreaterThan(since) {
-			out = append(out, r)
+
+	if s.changesDirty {
+		s.rebuildChangesIndex()
+	}
+
+	idx := sort.Search(len(s.changesIdx), func(i int) bool {
+		ck := s.changesIdx[i].clock
+		return ck.WallTime > since.WallTime ||
+			(ck.WallTime == since.WallTime && ck.Counter > since.Counter)
+	})
+
+	out := make([]Record, 0, len(s.changesIdx)-idx)
+	for ; idx < len(s.changesIdx); idx++ {
+		rec, ok := s.records[s.changesIdx[idx].key]
+		if !ok {
+			continue
 		}
+		out = append(out, rec)
 	}
 	return out, nil
 }
