@@ -137,15 +137,13 @@ func (d *MDNSDiscoverer) browse(addPeer func(string)) {
 	// mdns.Query blocks until the timeout expires or an error occurs.
 	// We run it in a goroutine and wait for it to return before closing entriesCh.
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if err := mdns.Query(params); err != nil {
 			if !isMulticastErr(err) {
 				slog.Error("[discovery] mDNS browse error", "err", err)
 			}
 		}
-	}()
+	})
 
 	<-d.stopCh
 	wg.Wait()        // wait for Query goroutine to return before closing entriesCh

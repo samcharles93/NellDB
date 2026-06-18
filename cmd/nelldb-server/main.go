@@ -17,6 +17,7 @@ import (
 	"github.com/samcharles93/NellDB"
 	"github.com/samcharles93/NellDB/logstore"
 	"github.com/samcharles93/NellDB/server"
+	"github.com/klauspost/compress/zstd"
 )
 
 func main() {
@@ -72,12 +73,24 @@ func main() {
 		s = nell.NewMemoryStore(*nodeID)
 		slog.Info("using in-memory store")
 	} else {
-		s, err = logstore.OpenLog(*dataPath, *nodeID)
+		opts := logstore.Options{
+			FlushInterval: time.Duration(cfg.Storage.FlushIntervalMs) * time.Millisecond,
+		}
+		if lvl, ok := compressionLevel(cfg.Storage.CompressionLevel); ok {
+			opts.CompressionLevel = lvl
+		}
+		s, err = logstore.OpenLogWithOptions(*dataPath, *nodeID, opts)
 		if err != nil {
 			slog.Error("failed to open log store", "err", err)
 			os.Exit(1)
 		}
 		defer func() { _ = s.Close() }()
+		if cfg.Storage.FlushIntervalMs > 0 {
+			slog.Info("group-commit enabled", "flush_interval_ms", cfg.Storage.FlushIntervalMs)
+		}
+		if cfg.Storage.CompressionLevel != "" && cfg.Storage.CompressionLevel != "default" {
+			slog.Info("compression level", "level", cfg.Storage.CompressionLevel)
+		}
 	}
 
 	// Type-assert to LogStore for auto-compaction.
@@ -208,4 +221,20 @@ func defaultNodeID() string {
 		host = "nell-server"
 	}
 	return host
+}
+
+// compressionLevel maps a config string to the zstd encoder level.  Returns
+// ok=false for empty or unknown values so the caller can fall back to default.
+func compressionLevel(s string) (zstd.EncoderLevel, bool) {
+	switch strings.ToLower(s) {
+	case "fastest":
+		return zstd.SpeedFastest, true
+	case "default":
+		return zstd.SpeedDefault, true
+	case "better":
+		return zstd.SpeedBetterCompression, true
+	case "best":
+		return zstd.SpeedBestCompression, true
+	}
+	return 0, false
 }

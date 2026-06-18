@@ -51,16 +51,77 @@ type LogStore struct {
 	writer  *bufio.Writer
 	zenc    *zstd.Encoder
 	zdec    *zstd.Decoder
+
+	// changesIdx is a lazily-rebuilt slice of (clock, key) pairs kept in
+	// ascending HLC order.  It is the index behind GetChangesSince so the
+	// replication path is O(log n + k) instead of a full scan.  Writes mark
+	// the index dirty; the next GetChangesSince rebuilds it if needed.
+	changesIdx []clockKey
+	changesDirty bool
+
+	// flushInterval, when >0, enables group-commit: writes return as soon
+	// as the record is in the in-memory index and appended to the buffered
+	// writer, and a background goroutine flushes the buffer to the kernel on
+	// this interval.  0 (the default) flushes on every write, preserving
+	// process-crash safety at the cost of one syscall per write.
+	flushInterval time.Duration
+	stopFlush     chan struct{}
 }
 
-// OpenLog opens (or creates) a LogStore at the given file path.
+// clockKey is a single entry in the changesIdx: the current winning HLC for a
+// record key, used to binary-search the GetChangesSince lower bound.
+type clockKey struct {
+	clock nell.HLC
+	key   string
+}
+
+// Options configures a LogStore at open time.  The zero value is safe and
+// matches the OpenLog defaults: per-write flush and SpeedDefault compression.
+type Options struct {
+	// FlushInterval controls how often the buffered writer is flushed to the
+	// kernel page cache.
+	//
+	//   0 (default) — flush after every write.  Each Put/Delete/PutLocal makes
+	//                 one write syscall.  Process-crash safe: a crash never
+	//                 loses buffered-but-unflushed data because there is none.
+	//   >0          — group commit.  Writes return immediately after buffering;
+	//                 a background goroutine flushes every FlushInterval.  On a
+	//                 process crash you lose at most the last FlushInterval of
+	//                 writes (torn-tail handling on replay already copes with
+	//                 partial frames).  Higher throughput, weaker durability.
+	//
+	// Neither setting calls fsync — durability against power loss requires a
+	// separate fsync (e.g. on Close or Compaction).
+	FlushInterval time.Duration
+
+	// CompressionLevel sets the Zstd encoder level.  Higher levels compress
+	// better but slower; SpeedFastest roughly halves encode time vs
+	// SpeedDefault at a modest ratio cost.  Defaults to SpeedDefault.
+	CompressionLevel zstd.EncoderLevel
+}
+
+// OpenLog opens (or creates) a LogStore at the given file path with the
+// default options (per-write flush, SpeedDefault compression).  It is the
+// safe, familiar entry point; callers that want group commit or a different
+// compression level should use OpenLogWithOptions.
 func OpenLog(path, nodeID string) (*LogStore, error) {
+	return OpenLogWithOptions(path, nodeID, Options{})
+}
+
+// OpenLogWithOptions opens (or creates) a LogStore with the given options.
+// See Options for the tradeoffs.
+func OpenLogWithOptions(path, nodeID string, opts Options) (*LogStore, error) {
+	level := opts.CompressionLevel
+	if level == 0 {
+		level = zstd.SpeedDefault
+	}
+
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("log: open %s: %w", path, err)
 	}
 
-	zenc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	zenc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(level))
 	if err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("log: zstd encoder: %w", err)
@@ -72,19 +133,25 @@ func OpenLog(path, nodeID string) (*LogStore, error) {
 	}
 
 	ls := &LogStore{
-		nodeID:  nodeID,
-		clock:   nell.NewHLC(),
-		records: make(map[string]nell.Record),
-		kv:      make(nell.KnowledgeVector),
-		file:    f,
-		writer:  bufio.NewWriter(f),
-		zenc:    zenc,
-		zdec:    zdec,
+		nodeID:        nodeID,
+		clock:         nell.NewHLC(),
+		records:       make(map[string]nell.Record),
+		kv:            make(nell.KnowledgeVector),
+		file:          f,
+		writer:        bufio.NewWriter(f),
+		zenc:          zenc,
+		zdec:          zdec,
+		flushInterval: opts.FlushInterval,
+		changesDirty:  true,
 	}
 
 	if err := ls.replay(); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("log: replay %s: %w", path, err)
+	}
+
+	if ls.flushInterval > 0 {
+		ls.startFlusher()
 	}
 
 	return ls, nil
@@ -268,12 +335,14 @@ func (ls *LogStore) Put(incoming nell.Record) (bool, nell.Record, error) {
 	if !ok {
 		ls.records[key] = incoming
 		ls.kv.Update(incoming.UpdatedBy, incoming.Clock)
+		ls.markChangesDirty()
 		return true, incoming, ls.append(incoming)
 	}
 
 	winner := nell.ResolveConflict(&existing, &incoming)
 	ls.records[key] = *winner
 	ls.kv.Update(winner.UpdatedBy, winner.Clock)
+	ls.markChangesDirty()
 	return winner == &incoming, *winner, ls.append(*winner)
 }
 
@@ -292,6 +361,7 @@ func (ls *LogStore) PutLocal(rec *nell.Record) (nell.Record, error) {
 	key := rec.Collection + ":" + rec.ID
 	ls.records[key] = *rec
 	ls.kv.Update(ls.nodeID, rec.Clock)
+	ls.markChangesDirty()
 	return *rec, ls.append(*rec)
 }
 
@@ -328,6 +398,7 @@ func (ls *LogStore) Delete(collection, id string) (nell.Record, error) {
 
 	ls.records[key] = rec
 	ls.kv.Update(ls.nodeID, rec.Clock)
+	ls.markChangesDirty()
 	return rec, ls.append(rec)
 }
 
@@ -369,13 +440,62 @@ func (ls *LogStore) Query(q nell.Query) ([]nell.Record, error) {
 func (ls *LogStore) GetChangesSince(since nell.HLC) ([]nell.Record, error) {
 	ls.mu.Lock()
 	defer ls.mu.Unlock()
-	var out []nell.Record
-	for _, r := range ls.records {
-		if r.Clock.GreaterThan(since) {
-			out = append(out, r)
+
+	// Rebuild the HLC index if any writes have landed since the last build.
+	// This is O(n log n) but happens at most once per batch of writes, not
+	// per query — consecutive GetChangesSince calls with no intervening
+	// writes reuse the cached index.
+	if ls.changesDirty {
+		ls.rebuildChangesIndex()
+	}
+
+	// Binary search for the first entry whose clock is strictly greater than
+	// since.  HLC.GreaterThan is a total order, so we compare on WallTime then
+	// Counter.
+	idx := sort.Search(len(ls.changesIdx), func(i int) bool {
+		ck := ls.changesIdx[i].clock
+		// Equivalent to ck.GreaterThan(since).
+		return ck.WallTime > since.WallTime ||
+			(ck.WallTime == since.WallTime && ck.Counter > since.Counter)
+	})
+
+	out := make([]nell.Record, 0, len(ls.changesIdx)-idx)
+	for ; idx < len(ls.changesIdx); idx++ {
+		rec, ok := ls.records[ls.changesIdx[idx].key]
+		if !ok {
+			continue
 		}
+		out = append(out, rec)
 	}
 	return out, nil
+}
+
+// markChangesDirty flags the HLC index as stale.  Called under the mutex by
+// every write path (Put, PutLocal, Delete, Compact).
+func (ls *LogStore) markChangesDirty() {
+	ls.changesDirty = true
+}
+
+// rebuildChangesIndex rebuilds the sorted (clock, key) slice from the current
+// records map.  Called under the mutex.
+func (ls *LogStore) rebuildChangesIndex() {
+	idx := make([]clockKey, 0, len(ls.records))
+	for key, rec := range ls.records {
+		idx = append(idx, clockKey{clock: rec.Clock, key: key})
+	}
+	sort.Slice(idx, func(i, j int) bool {
+		a, b := idx[i].clock, idx[j].clock
+		if a.WallTime != b.WallTime {
+			return a.WallTime < b.WallTime
+		}
+		// Tie-break on key for determinism; HLCs are not unique across nodes.
+		if a.Counter != b.Counter {
+			return a.Counter < b.Counter
+		}
+		return idx[i].key < idx[j].key
+	})
+	ls.changesIdx = idx
+	ls.changesDirty = false
 }
 
 // Compact rewrites the log file to reclaim space.  It:
@@ -481,6 +601,7 @@ func (ls *LogStore) Compact(tombstoneThreshold time.Duration) (int, error) {
 
 	// Update in-memory maps to reflect the compacted state.
 	ls.records = keep
+	ls.markChangesDirty()
 
 	ls.kv = make(nell.KnowledgeVector)
 	for _, rec := range keep {
@@ -576,6 +697,17 @@ func (ls *LogStore) SearchSimilar(collection string, queryVector []float32, limi
 func (ls *LogStore) Close() error {
 	ls.mu.Lock()
 	defer ls.mu.Unlock()
+
+	// Stop the group-commit flusher if running, then do a final flush
+	// before closing the file so no buffered writes are lost.
+	if ls.stopFlush != nil {
+		select {
+		case <-ls.stopFlush:
+		default:
+			close(ls.stopFlush)
+		}
+	}
+
 	if err := ls.writer.Flush(); err != nil {
 		return err
 	}
@@ -635,5 +767,32 @@ func (ls *LogStore) append(rec nell.Record) error {
 	if _, err := ls.writer.Write(compressed); err != nil {
 		return fmt.Errorf("write data: %w", err)
 	}
-	return ls.writer.Flush()
+
+	// Per-write flush unless group commit is enabled.
+	if ls.flushInterval <= 0 {
+		return ls.writer.Flush()
+	}
+	return nil
+}
+
+// startFlusher launches the background goroutine that periodically flushes the
+// buffered writer when group commit is enabled.  It is stopped by Close or by
+// flushing stopFlush.
+func (ls *LogStore) startFlusher() {
+	ls.stopFlush = make(chan struct{})
+	interval := ls.flushInterval
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ls.stopFlush:
+				return
+			case <-ticker.C:
+				ls.mu.Lock()
+				_ = ls.writer.Flush()
+				ls.mu.Unlock()
+			}
+		}
+	}()
 }

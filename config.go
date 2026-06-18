@@ -33,6 +33,16 @@ type Config struct {
 		IntervalMinutes  int `yaml:"interval_minutes"`
 		TombstoneTTLHours int `yaml:"tombstone_ttl_hours"`
 	} `yaml:"compaction"`
+	Storage struct {
+		// FlushIntervalMs controls group-commit batching for the logstore.
+		// 0 (default) flushes after every write (process-crash safe, one
+		// syscall per write).  >0 flushes on a background ticker, trading
+		// up to that many ms of writes on a crash for higher throughput.
+		FlushIntervalMs int `yaml:"flush_interval_ms"`
+		// CompressionLevel sets the Zstd encoder level: "fastest",
+		// "default", "better", or "best".  Defaults to "default".
+		CompressionLevel string `yaml:"compression_level"`
+	} `yaml:"storage"`
 	Peers []string `yaml:"peers"`
 	Vector struct {
 		EnableHNSW                bool `yaml:"enable_hnsw"`

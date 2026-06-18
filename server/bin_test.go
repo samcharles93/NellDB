@@ -269,7 +269,7 @@ func TestHandleBinPushMultiple(t *testing.T) {
 		rec := nell.Record{
 			ID:         fmt.Sprintf("doc-%d", i),
 			Type:       nell.TypeText,
-			Payload:    []byte(fmt.Sprintf("data-%d", i)),
+			Payload:    fmt.Appendf(nil, "data-%d", i),
 			Clock:      nell.HLC{WallTime: int64(1000 + i), Counter: 1},
 			UpdatedBy:  "client",
 			Collection: nell.DefaultCollection,

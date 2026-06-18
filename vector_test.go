@@ -127,7 +127,7 @@ func TestCosineSimilarityLargeVectorsOrthogonal(t *testing.T) {
 	b := make([]float32, n)
 	// Create an alternating-sign pattern so dot product is zero
 	// when n is even: (+1, -1, +1, -1, ...) dot (1, 1, 1, 1, ...) = 0
-	for i := 0; i < n; i++ {
+	for i := range n {
 		a[i] = 1.0
 		if i%2 == 0 {
 			b[i] = 1.0

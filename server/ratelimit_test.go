@@ -137,15 +137,13 @@ func TestRateLimiterConcurrentSameIP(t *testing.T) {
 	var mu sync.Mutex
 
 	for range 100 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if rl.Allow("192.0.2.1", now) {
 				mu.Lock()
 				allowed++
 				mu.Unlock()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -263,10 +261,10 @@ func TestRateLimiterCleanupLoop(t *testing.T) {
 
 	// Let the cleanup loop run at least one tick (it ticks every minute though).
 	// Since we can't wait a minute, manually trigger cleanup.
-	// But we already started the goroutine via Allow → once.Do. 
+	// But we already started the goroutine via Allow → once.Do.
 	// We'll directly test that stale entries get cleaned by letting the
 	// cleanup loop start and waiting, or by verifying the state holds.
-	
+
 	// Actually: cleanupLoop uses a ticker with 1 minute interval.
 	// Instead of waiting, verify the entry is still there now and that
 	// the cleanup goroutine starts.
