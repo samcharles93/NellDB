@@ -52,6 +52,12 @@ type LogStore struct {
 	zenc    *zstd.Encoder
 	zdec    *zstd.Decoder
 
+	// colIndex maps collection name → set of record keys in that collection.
+	// It is the index behind List/ListAll so those are O(collection size)
+	// instead of a full scan of every record.  Maintained incrementally on
+	// every write (Put, PutLocal, Delete) and rebuilt on replay/Compact.
+	colIndex map[string]map[string]struct{}
+
 	// changesIdx is a lazily-rebuilt slice of (clock, key) pairs kept in
 	// ascending HLC order.  It is the index behind GetChangesSince so the
 	// replication path is O(log n + k) instead of a full scan.  Writes mark
@@ -137,6 +143,7 @@ func OpenLogWithOptions(path, nodeID string, opts Options) (*LogStore, error) {
 		clock:         nell.NewHLC(),
 		records:       make(map[string]nell.Record),
 		kv:            make(nell.KnowledgeVector),
+		colIndex:      make(map[string]map[string]struct{}),
 		file:          f,
 		writer:        bufio.NewWriter(f),
 		zenc:          zenc,
@@ -298,6 +305,7 @@ func (ls *LogStore) replay() error {
 				} else {
 					ls.records[key] = *rec
 				}
+				ls.indexKey(key, rec.Collection)
 
 				ls.clock.Update(rec.Clock)
 				ls.kv.Update(rec.UpdatedBy, rec.Clock)
@@ -334,6 +342,7 @@ func (ls *LogStore) Put(incoming nell.Record) (bool, nell.Record, error) {
 	existing, ok := ls.records[key]
 	if !ok {
 		ls.records[key] = incoming
+		ls.indexKey(key, incoming.Collection)
 		ls.kv.Update(incoming.UpdatedBy, incoming.Clock)
 		ls.markChangesDirty()
 		return true, incoming, ls.append(incoming)
@@ -359,7 +368,11 @@ func (ls *LogStore) PutLocal(rec *nell.Record) (nell.Record, error) {
 	rec.UpdatedBy = ls.nodeID
 
 	key := rec.Collection + ":" + rec.ID
+	_, existed := ls.records[key]
 	ls.records[key] = *rec
+	if !existed {
+		ls.indexKey(key, rec.Collection)
+	}
 	ls.kv.Update(ls.nodeID, rec.Clock)
 	ls.markChangesDirty()
 	return *rec, ls.append(*rec)
@@ -397,6 +410,9 @@ func (ls *LogStore) Delete(collection, id string) (nell.Record, error) {
 	rec.Deleted = true
 
 	ls.records[key] = rec
+	if !ok {
+		ls.indexKey(key, collection)
+	}
 	ls.kv.Update(ls.nodeID, rec.Clock)
 	ls.markChangesDirty()
 	return rec, ls.append(rec)
@@ -408,9 +424,15 @@ func (ls *LogStore) List(collection string) ([]nell.Record, error) {
 	}
 	ls.mu.Lock()
 	defer ls.mu.Unlock()
-	var out []nell.Record
-	for _, r := range ls.records {
-		if r.Collection == collection && !r.Deleted {
+
+	set, ok := ls.colIndex[collection]
+	if !ok {
+		return nil, nil
+	}
+	out := make([]nell.Record, 0, len(set))
+	for key := range set {
+		r := ls.records[key]
+		if !r.Deleted {
 			out = append(out, r)
 		}
 	}
@@ -424,11 +446,14 @@ func (ls *LogStore) ListAll(collection string) ([]nell.Record, error) {
 	}
 	ls.mu.Lock()
 	defer ls.mu.Unlock()
-	var out []nell.Record
-	for _, r := range ls.records {
-		if r.Collection == collection {
-			out = append(out, r)
-		}
+
+	set, ok := ls.colIndex[collection]
+	if !ok {
+		return nil, nil
+	}
+	out := make([]nell.Record, 0, len(set))
+	for key := range set {
+		out = append(out, ls.records[key])
 	}
 	return out, nil
 }
@@ -474,6 +499,17 @@ func (ls *LogStore) GetChangesSince(since nell.HLC) ([]nell.Record, error) {
 // every write path (Put, PutLocal, Delete, Compact).
 func (ls *LogStore) markChangesDirty() {
 	ls.changesDirty = true
+}
+
+// indexKey adds key to the collection index for the given collection.  Called
+// under the mutex by every write path and the replay merge.  O(1) amortized.
+func (ls *LogStore) indexKey(key, collection string) {
+	set, ok := ls.colIndex[collection]
+	if !ok {
+		set = make(map[string]struct{})
+		ls.colIndex[collection] = set
+	}
+	set[key] = struct{}{}
 }
 
 // rebuildChangesIndex rebuilds the sorted (clock, key) slice from the current
@@ -602,6 +638,12 @@ func (ls *LogStore) Compact(tombstoneThreshold time.Duration) (int, error) {
 	// Update in-memory maps to reflect the compacted state.
 	ls.records = keep
 	ls.markChangesDirty()
+
+	// Rebuild the collection index from the compacted record set.
+	ls.colIndex = make(map[string]map[string]struct{}, 16)
+	for key, rec := range keep {
+		ls.indexKey(key, rec.Collection)
+	}
 
 	ls.kv = make(nell.KnowledgeVector)
 	for _, rec := range keep {

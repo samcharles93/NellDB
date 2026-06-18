@@ -2,6 +2,11 @@
 
 All notable changes for this project will be documented in this file.
 
+## [v0.2.3] - 2026-06-19
+
+### Changed
+- **Collection index for `List`/`ListAll`**: the logstore now maintains a `map[collection]set[key]` index, maintained incrementally on every write and rebuilt on replay/Compact. `List` and `ListAll` iterate only the keys in the requested collection instead of scanning the full records map, making them O(collection size) instead of O(total records). Measured 2.4-3.7x faster across 1K-100K records, with proportional memory allocation reduction (12.5 MB → 2.7 MB at 100K records spread across 5 collections).
+
 ## [v0.2.2] - 2026-06-19
 
 ### Added

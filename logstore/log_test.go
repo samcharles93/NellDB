@@ -768,3 +768,161 @@ func TestGetChangesSinceAfterCompact(t *testing.T) {
 		t.Fatalf("GetChangesSince after Compact = %d, want 2", len(got))
 	}
 }
+
+// ── Collection index ──────────────────────────────────────────────────────────
+
+func TestCollectionIndexMultipleCollections(t *testing.T) {
+	path := t.TempDir() + "/colidx.db"
+	ls, err := OpenLog(path, "node-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ls.Close() }()
+
+	// Write records across 3 collections.
+	_, _ = ls.PutLocal(&nell.Record{ID: "a1", Collection: "alpha", Type: nell.TypeText, Payload: []byte("a1")})
+	_, _ = ls.PutLocal(&nell.Record{ID: "a2", Collection: "alpha", Type: nell.TypeText, Payload: []byte("a2")})
+	_, _ = ls.PutLocal(&nell.Record{ID: "b1", Collection: "beta", Type: nell.TypeText, Payload: []byte("b1")})
+	_, _ = ls.PutLocal(&nell.Record{ID: "g1", Collection: "gamma", Type: nell.TypeText, Payload: []byte("g1")})
+
+	// Delete one alpha record — List should exclude it, ListAll should include it.
+	_, _ = ls.Delete("alpha", "a2")
+
+	alpha, err := ls.List("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alpha) != 1 {
+		t.Fatalf("List(alpha) = %d, want 1 (a2 deleted)", len(alpha))
+	}
+	if alpha[0].ID != "a1" {
+		t.Errorf("List(alpha)[0].ID = %q, want a1", alpha[0].ID)
+	}
+
+	alphaAll, err := ls.ListAll("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alphaAll) != 2 {
+		t.Fatalf("ListAll(alpha) = %d, want 2 (incl tombstone)", len(alphaAll))
+	}
+
+	beta, err := ls.List("beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(beta) != 1 {
+		t.Fatalf("List(beta) = %d, want 1", len(beta))
+	}
+
+	// Non-existent collection returns nil, not error.
+	empty, err := ls.List("nonexistent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("List(nonexistent) = %d, want 0", len(empty))
+	}
+}
+
+func TestCollectionIndexSurvivesReplay(t *testing.T) {
+	path := t.TempDir() + "/colidx-replay.db"
+
+	ls, _ := OpenLog(path, "node-a")
+	_, _ = ls.PutLocal(&nell.Record{ID: "a1", Collection: "alpha", Type: nell.TypeText, Payload: []byte("a1")})
+	_, _ = ls.PutLocal(&nell.Record{ID: "a2", Collection: "alpha", Type: nell.TypeText, Payload: []byte("a2")})
+	_, _ = ls.PutLocal(&nell.Record{ID: "b1", Collection: "beta", Type: nell.TypeText, Payload: []byte("b1")})
+	_, _ = ls.Delete("alpha", "a2")
+	_ = ls.Close()
+
+	ls2, err := OpenLog(path, "node-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ls2.Close() }()
+
+	// After replay the collection index should be rebuilt and List/ListAll
+	// should return correct results.
+	alpha, err := ls2.List("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alpha) != 1 {
+		t.Fatalf("List(alpha) after replay = %d, want 1", len(alpha))
+	}
+
+	alphaAll, err := ls2.ListAll("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alphaAll) != 2 {
+		t.Fatalf("ListAll(alpha) after replay = %d, want 2 (incl tombstone)", len(alphaAll))
+	}
+
+	beta, err := ls2.List("beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(beta) != 1 {
+		t.Fatalf("List(beta) after replay = %d, want 1", len(beta))
+	}
+}
+
+func TestCollectionIndexAfterCompact(t *testing.T) {
+	path := t.TempDir() + "/colidx-compact.db"
+	ls, err := OpenLog(path, "node-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ls.Close() }()
+
+	_, _ = ls.PutLocal(&nell.Record{ID: "a1", Collection: "alpha", Type: nell.TypeText, Payload: []byte("a1")})
+	_, _ = ls.PutLocal(&nell.Record{ID: "b1", Collection: "beta", Type: nell.TypeText, Payload: []byte("b1")})
+
+	// Create an old tombstone via Put with an old clock so Compact(1h)
+	// will drop it.
+	threeHoursAgo := time.Now().Add(-3 * time.Hour).UnixMilli()
+	_, _, _ = ls.Put(nell.Record{
+		ID:        "a2",
+		Collection: "alpha",
+		Type:      nell.TypeText,
+		Clock:     nell.HLC{WallTime: threeHoursAgo, Counter: 1},
+		UpdatedBy: "node-b",
+		Deleted:   true,
+	})
+
+	// Compact with 1-hour threshold — drops the old tombstone.
+	n, err := ls.Compact(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("Compact kept %d, want 2 (a1 + b1, old tombstone dropped)", n)
+	}
+
+	// After compact, List/ListAll should use the rebuilt collection index.
+	alpha, err := ls.List("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alpha) != 1 {
+		t.Fatalf("List(alpha) after compact = %d, want 1", len(alpha))
+	}
+
+	// a2 tombstone was dropped by compact — ListAll should only have a1.
+	alphaAll, err := ls.ListAll("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alphaAll) != 1 {
+		t.Fatalf("ListAll(alpha) after compact = %d, want 1 (tombstone dropped)", len(alphaAll))
+	}
+
+	beta, err := ls.List("beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(beta) != 1 {
+		t.Fatalf("List(beta) after compact = %d, want 1", len(beta))
+	}
+}
