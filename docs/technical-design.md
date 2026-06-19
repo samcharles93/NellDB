@@ -3,9 +3,10 @@
 ## 1. Overview
 
 NellDB is a distributed, real-time, document-oriented database.
-JSON-native, HTTP-synced, embeddable as a Go library or a JavaScript
-client.  One Go codebase compiles to three targets: a native server
-binary, a WASM client runtime, and a JavaScript SDK wrapper.
+JSON-native at the SDK layer, binary on the wire, embeddable as a Go
+library or a JavaScript client.  One Go codebase compiles to three
+targets: a native server binary, a WASM client runtime, and a
+JavaScript SDK wrapper.
 
 **Why it exists:** the data layer in an offline-first, real-time app
 should not require a managed sync service, a separate daemon, or two
@@ -28,22 +29,30 @@ and a single on-disk format.
 │  - syscall/js callbacks: nellPut, nellGet   │
 │  - JSON marshal/unmarshal across boundary   │
 ├─────────────────────────────────────────────┤
-│  Core Engine (core/)                        │  ← shared between all runtimes
+│  Core Engine (package nell)                 │  ← shared between all runtimes
 │  - Record, HLC, DataType                    │
 │  - Store interface                          │
-│  - MemoryStore (in-memory, thread-safe)     │
+│  - MemoryStore (in-memory, indexed)         │
 │  - ResolveConflict (LWW)                    │
 │  - CosineSimilarity (vector search)         │
+│  - KnowledgeVector                          │
 ├─────────────────────────────────────────────┤
-│  Storage Backend (implements Store)         │
-│  - Server: BboltStore (go.etcd.io/bbolt)    │
-│  - WASM:   IndexedDBStore (syscall/js)      │
+│  Storage Backends (implement Store)         │
+│  - LogStore (Zstd append-only frame log)    │
+│  - MemoryStore (in-memory, indexed)         │
+│  - IndexedDBStore (WASM, native key ranges) │
+├─────────────────────────────────────────────┤
+│  SDK (sdk/)                                 │  ← application layer
+│  - DocDB: MVCC _rev, AllDocs, changes feed  │
+│  - Replicator: Push/Pull/Live/LiveWS        │
 ├─────────────────────────────────────────────┤
 │  Server Runtime (server/)                   │  ← native Go binary
-│  - HTTP API: /sync/check, /sync/push        │
-│  - WebSocket realtime fan-out               │
-│  - PeerManager: gossip + anti-entropy       │
-│  - MeshRegistry: mDNS + seed peers          │
+│  - HTTP API: /sync/check, /sync/push,       │
+│    /sync/pull, /sync/bin/check,             │
+│    /sync/bin/push, /sync/ws                 │
+│  - HMAC auth, TLS, metrics                  │
+│  - MeshManager: anti-entropy + heartbeat    │
+│  - mDNS peer discovery                      │
 └─────────────────────────────────────────────┘
 ```
 
@@ -68,16 +77,18 @@ type HLC struct {
 }
 
 type Record struct {
-    ID        string    `json:"id"`
-    Type      DataType  `json:"type"`
-    Payload   []byte    `json:"payload,omitempty"`
-    Vector    []float32 `json:"vector,omitempty"`
-    Clock     HLC       `json:"clock"`
-    UpdatedBy string    `json:"updated_by"`
-    Deleted   bool      `json:"deleted"`
+    Collection string    `json:"collection"`
+    ID         string    `json:"id"`
+    Type       string    `json:"type"`
+    Payload    []byte    `json:"payload,omitempty"`
+    Vector     []float32 `json:"vector,omitempty"`
+    Clock      HLC       `json:"clock"`
+    UpdatedBy  string    `json:"updated_by"`
+    Deleted    bool      `json:"deleted"`
 }
 ```
 
+- `Collection` scopes records into named namespaces (default: `"default"`). The composite key is `collection:id`.
 - `Type` is a discriminator. New types can be added — text, vector, and image are the seed set.
 - `Payload` carries text (UTF-8) or image bytes. The application layer encodes/decodes.
 - `Vector` is a dedicated `[]float32` field so similarity scans don't unmarshal Payload.
@@ -85,11 +96,39 @@ type Record struct {
 - `UpdatedBy` is the node ID that last mutated the record. Used in conflict resolution (§6) as the deterministic tie-breaker.
 - `Deleted` is an explicit tombstone. Deleted records propagate through sync and are eventually compacted.
 
-### 3.2 Wire Format
+### 3.2 Binary Encoding
 
-All records serialise to/from JSON. The WASM bridge receives JSON strings from JS and unmarshals them into Go structs. The sync protocol sends records as JSON arrays.
+Records use a custom binary encoding for persistence and the high-performance sync endpoints. The layout is:
 
-Future: a binary CBOR or flat-buffer wire format to reduce per-message overhead for large sync batches.
+```
+[1 byte: version]
+[1 byte: deleted (0/1)]
+[12 bytes: HLC clock]
+[2 bytes: collection len] [N bytes: collection]
+[2 bytes: id len]          [N bytes: id]
+[2 bytes: type len]        [N bytes: type]
+[2 bytes: updatedBy len]   [N bytes: updatedBy]
+[4 bytes: vector count]    [N*4 bytes: float32 vector data]
+[4 bytes: payload len]     [N bytes: payload]
+```
+
+This encoding is used by `Record.MarshalBinary`/`UnmarshalBinary` for:
+- LogStore frame format (Zstd-compressed)
+- `/sync/bin/check` and `/sync/bin/push` endpoints (length-prefixed streaming)
+
+The legacy JSON endpoints (`/sync/pull`, `/sync/push`, `/sync/check`) still use JSON for backwards compatibility, but the binary endpoints are the primary high-throughput path.
+
+### 3.3 LogStore Frame Format
+
+Each record is persisted as a length-prefixed Zstd-compressed frame:
+
+```
+[4 bytes: uncompressed_len (big-endian uint32)]
+[4 bytes: compressed_len   (big-endian uint32)]
+[compressed_len bytes: Zstd-compressed binary record]
+```
+
+The format is append-only and crash-safe — a torn frame at the tail is ignored on replay. Startup replays the entire log in parallel (1BRC-style worker pool) to rebuild the in-memory index.
 
 ---
 
@@ -100,43 +139,62 @@ Future: a binary CBOR or flat-buffer wire format to reduce per-message overhead 
 ```go
 type Store interface {
     Put(incoming Record) (accepted bool, current Record, err error)
-    Get(id string) (Record, error)
-    List() ([]Record, error)
+    PutLocal(rec *Record) (Record, error)
+    Get(collection, id string) (Record, error)
+    Delete(collection, id string) (Record, error)
+    List(collection string) ([]Record, error)
+    ListAll(collection string) ([]Record, error) // includes tombstones
+    Query(q Query) ([]Record, error)
     GetChangesSince(clock HLC) ([]Record, error)
-    Delete(id string) error
+    SearchSimilar(collection string, vector []float32, limit int) ([]Record, error)
+    NodeID() string
     Close() error
 }
 ```
 
-Everything above this interface — the sync engine, conflict resolver, HTTP handlers — operates on `Store`, never on a concrete backend.
+Everything above this interface — the sync engine, conflict resolver, HTTP handlers, SDK — operates on `Store`, never on a concrete backend.
 
 ### 4.2 Implementations
 
 | Backend | Target | Persistent? | Notes |
 |---|---|---|---|
-| `MemoryStore` | All (default) | No | `sync.RWMutex` + `map[string]Record`. Used for PoC and tests. |
-| `BboltStore` | Native server | Yes | `go.etcd.io/bbolt`. Pure Go, CGO-free. B+ tree with ACID transactions. Single writer, multiple readers. |
-| `IndexedDBStore` | WASM client | Yes | Wraps browser IndexedDB via `syscall/js`. Object store keyed by record ID. Clock-indexed for range queries. |
+| `MemoryStore` | All (default for tests) | No | `sync.RWMutex` + `map[string]Record`. Collection index + HLC index for sublinear scans. |
+| `LogStore` | Native server | Yes | Append-only Zstd-compressed binary log. Parallel replay. Collection index + HLC index. Configurable flush and compression. |
+| `IndexedDBStore` | WASM client | Yes | Wraps browser IndexedDB via `syscall/js`. Uses native `IDBKeyRange` queries for collection-scoped reads. |
 
-### 4.3 bbolt Bucket Layout (BboltStore)
+### 4.3 LogStore
 
-```
-/records/{id}        → JSON-serialised Record
-/clock_index/{clock} → record ID        (for GetChangesSince range scans)
-/meta/node_id        → this server's NodeID
-/meta/knowledge_vec  → serialised KnowledgeVector
-```
+`logstore.OpenLog(path, nodeID)` opens (or creates) a LogStore. `logstore.OpenLogWithOptions(path, nodeID, opts)` adds two knobs:
 
-`Put()` writes the record and clock index entry in a single bbolt transaction. `GetChangesSince()` does a cursor seek on `/clock_index/` starting from the given HLC.
+- **`FlushInterval`**: 0 (default) flushes after every write (process-crash safe, one syscall per write). >0 enables group commit — a background goroutine flushes on the interval, trading up to that much latency on crash for ~1.5x write throughput.
+- **`CompressionLevel`**: Zstd encoder level (Fastest/Default/Better/Best). `SpeedFastest` roughly halves encode time vs `SpeedDefault` at a modest ratio cost.
 
-### 4.4 IndexedDB Layout (IndexedDBStore)
+Neither mode calls `fsync` — durability against power loss requires a separate fsync (e.g. on Close or Compaction).
+
+### 4.4 Secondary Indexes
+
+Both `MemoryStore` and `LogStore` maintain two secondary indexes:
+
+1. **Collection index** (`map[collection]set[key]`): makes `List`/`ListAll` O(collection size) instead of O(total records). Maintained incrementally on every write (O(1)).
+2. **HLC index** (lazily-rebuilt `[]clockKey` sorted by HLC): makes `GetChangesSince` O(log n + k) instead of O(n). Writes set a dirty flag; the next query rebuilds if needed.
+
+`IndexedDBStore` uses native `IDBKeyRange.bound` queries, which serve the same purpose.
+
+### 4.5 Compaction
+
+`LogStore.Compact(tombstoneThreshold)` rewrites the log file to reclaim space:
+- Keeps only the latest version of each record (from the in-memory index, no file rescan)
+- Drops tombstones older than the threshold
+- Writes to a temp file, then atomically renames
+
+Auto-compaction runs on a background ticker (`StartCompaction`), configured via `nell.yaml`.
+
+### 4.6 IndexedDB Layout
 
 ```
 Database: NellDB
-  ObjectStore: records (keyPath: id)
-    Index: clock (on record.clock.wall_time, non-unique)
-  ObjectStore: outbox (keyPath: autoincrement)
-    Stores {id, clock} of pending mutations
+  ObjectStore: records (keyPath: "collection:id")
+    List/ListAll use IDBKeyRange.bound(collection+":", collection+":\uffff")
 ```
 
 ---
@@ -147,22 +205,25 @@ Database: NellDB
 
 Clients can be offline for a week. Wall clocks drift. NTP is not guaranteed on mobile or Electron. Pure logical clocks (Lamport) solve ordering but produce timestamps unrelated to real time. Vector clocks capture causality but grow with the cluster.
 
-HLC combines both: a physical wall time (for human-readable ordering and catch-up) with a logical counter (for causal ordering of events in the same millisecond). Two ints, 16 bytes. Converges to physical time when nodes communicate.
+HLC combines both: a physical wall time (for human-readable ordering and catch-up) with a logical counter (for causal ordering of events in the same millisecond). 12 bytes. Converges to physical time when nodes communicate.
 
 ### 5.2 Algorithm
 
 ```
-On local write:
-  wall = max(local.WallTime, system.Now().UnixMilli())
-  if wall == local.WallTime:
-    local.Counter++
-  else:
+On local write (Tick):
+  now = system.Now().UnixMilli()
+  if now > local.WallTime:
+    local.WallTime = now
     local.Counter = 0
-  local.WallTime = wall
+  else:
+    local.Counter++
 
-On receiving a peer message with clock peerClock:
-  local.WallTime = max(local.WallTime, peerClock.WallTime)
-  local.Counter = max(local.Counter + 1, peerClock.Counter + 1)
+On receiving a peer message with clock peerClock (Update):
+  if peerClock.WallTime > local.WallTime:
+    local.WallTime = peerClock.WallTime
+    local.Counter = peerClock.Counter + 1
+  else if peerClock.WallTime == local.WallTime && peerClock.Counter >= local.Counter:
+    local.Counter = peerClock.Counter + 1
 ```
 
 `GreaterThan` is lexical: compare WallTime first, then Counter.
@@ -195,165 +256,105 @@ func ResolveConflict(local, incoming *Record) *Record {
 
 This function is pure and deterministic. Every node that applies the same inputs reaches the same conclusion.
 
+There are two conflict layers:
+- **Local stale-write detection**: the SDK's `_rev` check (see §7).
+- **Cross-node convergence**: engine-level LWW using HLC first and lexical `UpdatedBy` as the deterministic tie-break.
+
 ### 6.2 Tombstones
 
-A deletion sets `Deleted: true` with the current HLC. The tombstone propagates through sync like any other record. When a tombstone arrives with a clock higher than the local record, the local record is marked deleted. Tombstones are compacted after a configurable horizon (default: 30 days).
-
-### 6.3 Conflict Callbacks (SDK)
-
-The JS SDK exposes `onConflict(recordID, localVersion, acceptedVersion)` so applications can detect overwrites. The engine does not surface the losing version automatically (PoC scope).
+A deletion sets `Deleted: true` with the current HLC. The tombstone propagates through sync like any other record. When a tombstone arrives with a clock higher than the local record, the local record is marked deleted. Tombstones are compacted after a configurable horizon (default: 7 days / 168 hours).
 
 ---
 
-## 7. Client Architecture (Offline-First)
+## 7. SDK Layer (package sdk)
 
-### 7.1 Local Store
+### 7.1 DocDB
 
-The WASM client runs `IndexedDBStore` (or `MemoryStore` for ephemeral mode). All reads and writes hit the local store first. There is no network round-trip for a write to succeed.
+`DocDB` is the application-facing document layer. It maps user `sdk.Doc` (a `map[string]any`) onto engine `nell.Record` values.
 
-### 7.2 Outbox Log
+- **MVCC `_rev`**: each document version gets a content-hash rev token (`1-<sha1>`). Stale writes are rejected with `ErrConflict`.
+- **`AllDocs`**: prefix-scoped document listing.
+- **Changes feed**: best-effort streaming of document changes (drops when subscriber buffers fill — use `AllDocs`/replication for a complete view).
+- **Reserved fields**: `_id`, `_rev`, `_deleted`. Everything else is application data and round-trips unchanged.
+- **Replication metadata**: stored as ordinary records with synthetic IDs `meta:clock` and `meta:vector`, filtered out of replication payloads.
 
-Every mutation is tracked in an append-only outbox:
+### 7.2 Replicator
 
-- On `Put()` or `Delete()`, append `{id, clock}` to the outbox.
-- The outbox is ordered by HLC — the order mutations happened locally.
-- Deduplication: only the latest version of each record ID is kept (previous outbox entries for the same ID are pruned on write).
+`sdk.Replicator` is the replication path for Go clients:
 
-### 7.3 Reconnection Sequence
-
-When connectivity to the home server is restored:
-
-```
-1. PULL:  Client sends lastKnownServerClock → Server streams changes
-2. APPLY: Each incoming record → Store.Put() (LWW resolves conflicts)
-3. PUSH:  Client sends outbox entries → Server applies via its own Put()
-4. ACK:   Server responds with confirmed clocks → Client clears outbox
-5. WATCH: Client opens WebSocket for real-time sync
-```
-
-Pull-then-push ordering minimises the window for conflicts: the client sees the server's state before sending its own changes.
-
-### 7.4 Offline Duration
-
-No limit. The outbox grows linearly with the number of unique documents mutated while offline. Write-heavy offline workloads may produce thousands of outbox entries; deduplication keeps this bounded to one entry per document.
+- **`Pull`**: uses `/sync/check` (anti-entropy via KnowledgeVector), not `/sync/pull`. Per-peer knowledge vectors survive concurrent writes from different nodes.
+- **`Push`**: uses `/sync/bin/push` (binary) for throughput.
+- **`Live`**: HTTP polling on an interval.
+- **`LiveWS`**: WebSocket push-based sync with automatic reconnect and exponential-backoff jitter.
+- **HMAC auth**: `SetAuthSecret()` signs all HTTP requests with `X-Nell-Timestamp` / `X-Nell-Signature` headers.
 
 ---
 
-## 8. Server Architecture
+## 8. Client Architecture (Offline-First)
 
-### 8.1 Deployment Modes
+### 8.1 Local Store
+
+The WASM client runs `IndexedDBStore` (or `MemoryStore` as fallback). All reads and writes hit the local store first. There is no network round-trip for a write to succeed.
+
+### 8.2 WASM Bridge
+
+`client/main.go` (build tag `js,wasm`) registers global JS callbacks (`nellPut`, `nellGet`, `nellDelete`, `nellList`) backed by the store. `client/nell.js` is a thin wrapper around those callbacks. `main()` blocks on `<-ch` to keep the WASM instance alive.
+
+---
+
+## 9. Server Architecture
+
+### 9.1 Deployment Modes
 
 | Mode | Description |
 |---|---|
 | **Standalone** | One server process. Accepts client syncs. No peer replication. |
-| **Distributed mesh** | Multiple server processes. Peer-to-peer replication via gossip + anti-entropy. |
+| **Distributed mesh** | Multiple server processes. Peer-to-peer replication via anti-entropy + WebSocket broadcast. |
 
-Same binary. Configured via a `peers` list or mDNS discovery.
+Same binary. Configured via a `peers` list in `nell.yaml` or mDNS discovery (`--discovery` flag).
 
-### 8.2 Sync Protocol
+### 9.2 Sync Endpoints
 
-#### Real-time Push (WebSocket)
+| Endpoint | Protocol | Purpose |
+|---|---|---|
+| `POST /sync/check` | JSON | Anti-entropy: client sends KnowledgeVector, server returns missing records as JSON |
+| `POST /sync/bin/check` | Binary | Same as `/sync/check` but uses binary encoding + length-prefixed streaming |
+| `POST /sync/push` | JSON | Client sends a batch of records, server applies via LWW |
+| `POST /sync/bin/push` | Binary | Same as `/sync/push` but binary-encoded |
+| `POST /sync/pull` | JSON | Client sends a single HLC, server streams all records newer than that |
+| `GET /sync/ws` | WebSocket | Real-time push: server broadcasts mutations to connected peers |
+| `GET /health` | JSON | Health probe (no auth) |
+| `GET /ready` | JSON | Readiness probe (no auth) |
 
-- Servers maintain WebSocket connections to known peers.
-- When a local write succeeds, the mutation is broadcast as JSON to all connected peers.
-- WebSocket ping/pong frames detect liveness.
+Binary endpoints (`/sync/bin/*`) use `Record.MarshalBinary` with `[4-byte length prefix][record bytes]` framing. These are the primary high-throughput path used by `sdk.Replicator`.
 
-#### Anti-Entropy Pull (HTTP)
+All `/sync/*` routes (except health/ready) are wrapped with HMAC auth when a secret is configured.
 
-- Endpoint: `POST /sync/check`
-- Request body: `{"sender_node_id": "...", "vector": {"node-a": "1749283920000:42", ...}}`
-- Response body: `{"receiver_node_id": "...", "missing_changes": [{...}, ...]}`
-- Algorithm:
-  1. Server A sends its Knowledge Vector to Server B.
-  2. Server B iterates its store for records where `Record.Clock > Vector[Record.UpdatedBy]`.
-  3. Server B streams missing records back.
-  4. Server A applies each via `Store.Put()` (LWW convergence).
-
-#### Client Sync (HTTP + WebSocket)
-
-- Endpoint: `POST /sync/pull` — client sends last-known server clock, receives changes.
-- Endpoint: `POST /sync/push` — client sends outbox entries, receives acks.
-- After push/pull, client upgrades to WebSocket for real-time.
-
-### 8.3 Knowledge Vector
+### 9.3 Knowledge Vector
 
 ```go
 type KnowledgeVector map[string]HLC
 ```
 
-Each server tracks the highest HLC it has seen from every other node (identified by `UpdatedBy`). The vector is:
+Each node tracks the highest HLC it has seen from every other node (identified by `UpdatedBy`). The vector is:
 - Updated on every `Put()`: `vector[record.UpdatedBy] = max(vector[record.UpdatedBy], record.Clock)`.
-- Persisted in bbolt under `/meta/knowledge_vec`.
 - Exchanged during anti-entropy to compute deltas.
+- Persisted as a synthetic record (`meta:vector`) in the store.
 
-### 8.4 Peer Discovery
+### 9.4 MeshManager
+
+`server.MeshManager` (`server/peer.go`) handles server-to-server reconciliation:
+
+- Reconciles with all active peers per tick (max 4 concurrent) instead of one random peer.
+- `TrackedPeer` state machine: Active → Degraded → Dead, with background heartbeat (`HEAD /health` every 10s).
+- Dead peers are excluded from reconciliation and broadcast.
+
+### 9.5 Peer Discovery
 
 | Method | Scope | How |
 |---|---|---|
-| **mDNS** | LAN | Advertise `_nell-core._tcp` service. Browse for peers on same subnet. |
-| **Seed peers** | WAN | Configured static list. Server connects to seeds, requests peer list. |
-
-### 8.5 Peer State Machine
-
-```
-[Discovered] → ACTIVE (gossip enabled)
-ACTIVE → DEGRADED (missed heartbeat, gossip suspended)
-DEGRADED → ACTIVE (heartbeat recovered)
-DEGRADED → DEAD (max retries exceeded, purged)
-```
-
-Heartbeat loop: background ticker pings each peer. Missed pings transition state. Gossip push is suspended to degraded/dead peers to prevent buffer bloat.
-
----
-
-## 9. JS SDK Surface
-
-### 9.1 NellDB Class
-
-```js
-class NellDB {
-  async init(wasmUrl)           // Load WASM, start Go runtime
-  async put(record)             // {id, type, payload, vector?} → {updated, record}
-  async get(id)                 // → Record | null
-  async delete(id)              // → {updated, record} (record has deleted:true)
-  async list(filter?)           // → Record[]
-  async searchSimilar(vector, limit) // → Record[] sorted by cosine similarity
-  async sync(serverUrl)         // Start sync with home server
-  async close()                 // Shut down
-
-  // Lifecycle
-  onConnect(callback)           // WebSocket established
-  onDisconnect(callback)        // Connection lost
-  onConflict(callback)          // (id, local, accepted) called on LWW overwrite
-  onSyncComplete(callback)      // Pull+push cycle finished
-}
-```
-
-### 9.2 Initialisation
-
-```js
-import { NellDB } from './nell.js';
-const db = new NellDB();
-await db.init('./nell.wasm');
-await db.put({ id: 'note-1', type: 'text', payload: 'Hello' });
-await db.sync('https://home.example.com');
-```
-
-### 9.3 WASM Bridge
-
-`client/main.go` (build tag `js,wasm`) registers global JS callbacks:
-
-```go
-js.Global().Set("nellPut", js.FuncOf(func(this js.Value, args []js.Value) any {
-    var rec core.Record
-    json.Unmarshal([]byte(args[0].String()), &rec)
-    updated, current := store.Put(rec)
-    resp, _ := json.Marshal(map[string]any{"updated": updated, "record": current})
-    return js.ValueOf(string(resp))
-}))
-```
-
-`main()` blocks on `<-ch` to keep the WASM instance alive. The JS SDK calls `go.run(instance)` which registers all callbacks, then the class methods call those global functions.
+| **mDNS** | LAN | Advertise `_nell-core._tcp` service. Browse for peers on same subnet. Gracefully degrades on platforms without multicast (Docker, WSL). |
+| **Seed peers** | WAN | Configured static list in `nell.yaml`. |
 
 ---
 
@@ -369,34 +370,23 @@ func CosineSimilarity(a, b []float32) float32 {
 }
 ```
 
-Acceptable for PoC scale (thousands of vectors). Swappable for HNSW later.
+`SearchSimilar` leverages 1BRC-style parallelism to saturate CPU cores during the scan. Candidates are filtered by collection and type before the parallel scan.
 
-### 10.2 Store Interface Addition
+### 10.2 Future: HNSW + PQ
 
-```go
-type Store interface {
-    // ...
-    SearchSimilar(vector []float32, limit int) ([]Record, error)
-}
-```
-
-`MemoryStore` implementation: iterate all records with `Type == TypeVector`, compute cosine distance, return top-K sorted.
-
-### 10.3 Future: HNSW-lite
-
-The spec-sim swarm converged on a SIMD-friendly HNSW-lite index with quantised int8 vectors stored in a columnar SoA layout. This is scoped for post-PoC.
+The config supports `vector.enable_hnsw`, `vector.pca_dimensions`, `vector.pq_subspaces`, and `vector.pq_centroids` for a future HNSW + product quantization index. This is scoped for post-PoC.
 
 ---
 
 ## 11. Compression
 
-### 11.1 Per-Payload Compression
+### 11.1 LogStore Compression
 
-Payloads exceeding a configurable threshold (default: 1 KB) are compressed before storage using `compress/zlib` (stdlib). A 1-byte flag in the record header indicates compression.
+All LogStore frames are compressed with Zstd (`klauspost/compress/zstd`) — a pure-Go, CGO-free, WASM-compatible implementation. The compression level is configurable via `Options.CompressionLevel`.
 
 ### 11.2 Wire Compression
 
-Sync batches over HTTP are gzip-compressed (`Content-Encoding: gzip`). WebSocket frames are sent uncompressed for latency (individual mutations are small).
+Sync batches over HTTP may be gzip-compressed (`Content-Encoding: gzip`). Binary endpoints use `application/octet-stream` with length-prefixed framing.
 
 ---
 
@@ -404,17 +394,17 @@ Sync batches over HTTP are gzip-compressed (`Content-Encoding: gzip`). WebSocket
 
 ### 12.1 Local Write Atomicity
 
-A `Put()` operation in `BboltStore` writes both the record and clock index entry in a single bbolt transaction. Either both land or neither does. The `MemoryStore` equivalent holds `sync.Mutex` for the duration of the write.
+A `Put()` operation holds the store mutex for the duration of the write: in-memory index update + append to the buffered writer. The in-memory map and the log are updated atomically from the caller's perspective.
 
 ### 12.2 Crash Recovery
 
-`BboltStore` uses bbolt's built-in crash recovery: write-ahead log with page-level atomicity. On restart, bbolt replays the WAL and recovers to the last consistent state.
+LogStore is append-only. On restart, the log is replayed frame-by-frame (in parallel) to rebuild the in-memory index. A torn frame at the tail (partial write during crash) is detected by header/length checks and silently skipped. No WAL replay or page recovery needed — the append-only design is inherently crash-safe.
+
+Group-commit mode (`FlushInterval > 0`) may lose the last flush interval of writes on a process crash. Torn-tail handling on replay copes with partial frames.
+
+### 12.3 IndexedDB
 
 `IndexedDBStore` relies on IndexedDB's transaction durability (browser-managed).
-
-### 12.3 Multi-Document Batches (Future)
-
-Not in PoC scope. The spec-sim swarm proposed a two-phase commit protocol with explicit intent logs. This is deferred.
 
 ---
 
@@ -429,33 +419,14 @@ Not in PoC scope. The spec-sim swarm proposed a two-phase commit protocol with e
 //go:generate cp $GOROOT/misc/wasm/wasm_exec.js .
 ```
 
-Running `go generate ./client/...` produces:
-- `nell.wasm` — the compiled engine
-- `wasm_exec.js` — Go's WASM runtime shim
-
-Combined with the hand-written `nell.js`, this forms the complete client SDK bundle.
+Running `go generate ./client/...` produces `client/nell.wasm` and `client/wasm_exec.js`.
 
 ### 13.2 Makefile Targets
 
 ```makefile
-build-wasm:   go generate ./client/...      # → client/nell.wasm + wasm_exec.js
-build-server: go build -o bin/nelldb-server server/main.go
-build-all:    build-wasm build-server
-```
-
-### 13.3 Distribution
-
-The JS SDK ships as a single directory:
-```
-client/
-├── nell.js          ← import this
-├── nell.wasm        ← loaded at runtime
-└── wasm_exec.js     ← Go runtime shim
-```
-
-The Go server is a library:
-```go
-import "github.com/samcharles93/NellDB/server"
+build-wasm:   go generate ./client/...
+build-server: go build -o bin/nelldb-server ./cmd/nelldb-server/
+test-wasm:    # builds WASM + runs under Node via wasm_exec.js
 ```
 
 ---
@@ -464,86 +435,80 @@ import "github.com/samcharles93/NellDB/server"
 
 ```
 NellDB/
-├── types.go             # package nell — Record, HLC, DataType
-├── store.go             # package nell — Store interface, MemoryStore, ResolveConflict, KnowledgeVector
+├── types.go              # package nell — Record, HLC, DataType
+├── store.go              # package nell — Store interface, MemoryStore, ResolveConflict, KnowledgeVector, indexes
+├── vector.go             # package nell — CosineSimilarity
+├── config.go             # package nell — Config, LoadConfig, DefaultConfig
+├── sign.go               # package nell — HMAC signing for sync auth
 ├── logstore/
-│   └── log.go           # package logstore — append-only Zstd-compressed LogStore
-├── client/
-│   ├── main.go          # WASM entrypoint + syscall/js callbacks (build: js && wasm)
-│   ├── generate.go      # go:generate directives
-│   └── nell.js          # JS SDK wrapper
-├── server/
-│   ├── main.go          # HTTP server + WebSocket fan-out
-│   └── replication.go   # PeerManager interface
+│   ├── log.go            # LogStore — append-only Zstd frame log, indexes, compaction
+│   └── log_test.go       # Tests: persistence, replay, corruption, compaction, indexes
 ├── sdk/
-│   ├── doc.go           # package sdk — Doc, Change, DocRange types
-│   ├── docdb.go         # DocDB — document API (MVCC _rev, real-time changes)
-│   ├── replicate.go     # Replicator — Push/Pull/Sync/Live
-│   ├── meta.go          # Persisted meta:clock for incremental pull
-│   ├── vector.go        # Persisted meta:vector (KnowledgeVector on disk)
-│   ├── rev.go           # _rev generation (gen-sha1 tokens)
-│   └── changes.go       # Changes feed hub
+│   ├── doc.go            # Doc, Change, DocRange types
+│   ├── docdb.go          # DocDB — document API (MVCC _rev, AllDocs, changes)
+│   ├── replicate.go      # Replicator — Push/Pull/Live/LiveWS
+│   ├── meta.go           # Persisted meta:clock
+│   ├── vector.go         # Persisted meta:vector (KnowledgeVector)
+│   ├── rev.go            # _rev generation (sha1 tokens)
+│   └── changes.go        # Changes feed hub
+├── server/
+│   ├── main.go           # Server, HTTP handlers, binary sync endpoints
+│   ├── peer.go           # MeshManager, TrackedPeer, anti-entropy
+│   ├── discovery.go      # mDNS peer discovery
+│   ├── metrics.go        # Prometheus metrics
+│   ├── auth.go           # HMAC auth middleware
+│   └── webui.go          # Optional web dashboard
+├── client/
+│   ├── main.go           # WASM entrypoint + syscall/js callbacks
+│   ├── generate.go       # go:generate directives
+│   └── nell.js           # JS SDK wrapper
 ├── cmd/nelldb-server/
-│   └── main.go          # Server CLI entrypoint
+│   └── main.go           # Server CLI entrypoint
 ├── examples/
-│   └── example.go       # Runnable tour of the SDK
+│   ├── tour/             # End-to-end SDK tour
+│   ├── perf/             # In-memory throughput benchmark
+│   ├── perf-persist/     # Durable (LogStore) throughput benchmark
+│   ├── sync/             # Sync demo
+│   ├── sync-bench/       # Sync throughput benchmark
+│   └── vector/           # Vector search demo
 ├── docs/
-│   ├── status.md
 │   ├── technical-design.md
-│   └── architecture/adrs/
+│   └── status.md
 ├── go.mod
-└── Makefile
+├── Makefile
+└── nell.yaml             # Default server config
 ```
 
 ---
 
-## 15. Implementation Phases
+## 15. Configuration
 
-### Phase 1 — Core Engine (Week 1-2)
+Server configuration is loaded from `nell.yaml` (overridable via CLI flags):
 
-- [x] `types.go` — Record, HLC, DataType (done)
-- [x] HLC tick logic, GreaterThan, Update, clock string
-- [x] `store.go` — Store interface, MemoryStore with LWW conflict resolution (done)
-- [ ] `vector.go` — CosineSimilarity, SearchSimilar on MemoryStore
-- [x] `store_test.go` — 35 tests: HLC, LWW, KnowledgeVector, MemoryStore (edge/stress/concurrency)
+```yaml
+server:
+  port: 9342
+  data_dir: "."
+  max_skew_ms: 500
 
-### Phase 2 — Persistent Server Storage (Week 2-3)
+storage:
+  flush_interval_ms: 0       # 0 = per-write flush (safe), >0 = group commit
+  compression_level: "default" # fastest|default|better|best
 
-- [x] `logstore/log.go` — LogStore with Zstd-compressed append-only binary log
-- [x] `logstore/log_test.go` — 15 tests: persistence, replay, corruption, concurrency
-- [ ] Bucket layout: records, clock_index, meta
-- [ ] `GetChangesSince` via cursor walk on clock_index
-- [ ] Crash recovery test
+compaction:
+  interval_minutes: 60
+  tombstone_ttl_hours: 168   # 7 days
 
-### Phase 3 — Server Sync (Week 3-4)
+sync:
+  max_batch_size: 1000
+  staleness_eviction_days: 14
 
-- [ ] `server/peer.go` — PeerManager, KnowledgeVector
-- [ ] `server/replication.go` — anti-entropy logic, gossip broadcast
-- [ ] `server/handler.go` — HTTP endpoints: /sync/check, /sync/pull, /sync/push
-- [ ] WebSocket fan-out on mutation
-- [ ] `server/discovery.go` — MeshRegistry, seed peers
+discovery:
+  enabled: false
 
-### Phase 4 — WASM Client (Week 4-5)
-
-- [ ] `client/main.go` — WASM callbacks for put, get, delete, list, search (partial done)
-- [ ] `store/indexeddb.go` — IndexedDBStore via syscall/js (or MemoryStore for PoC)
-- [ ] `client/nell.js` — NellDB class with full API surface
-- [ ] Sync lifecycle hooks: onConnect, onDisconnect, onConflict, onSyncComplete
-
-### Phase 5 — Integration & Polish (Week 5-6)
-
-- [ ] End-to-end: WASM client → mock server → sync push/pull
-- [ ] Outbox log on client
-- [ ] Pull-then-push reconnection sequence
-- [ ] Conflict callback in JS SDK
-- [ ] `go generate` pipeline verified
-- [ ] README with quickstart
-
-### Phase 6 — Hardening (Post-PoC)
-
-- [ ] mDNS discovery
-- [ ] Peer state machine heartbeat loop
-- [ ] Payload compression
-- [ ] Tombstone compaction
-- [ ] HNSW-lite vector index
-- [ ] Binary wire format (CBOR or flat buffers)
+vector:
+  enable_hnsw: true
+  pca_dimensions: 128
+  pq_subspaces: 16
+  pq_centroids: 256
+```
