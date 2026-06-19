@@ -6,6 +6,7 @@
 *.dylib
 *.wasm
 
+/nelldb
 /nell-server
 /nelldb-server
 /client/wasm_exec.js
