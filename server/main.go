@@ -176,6 +176,7 @@ func (s *Server) handleBinPush(w http.ResponseWriter, r *http.Request) {
 
 	accepted := 0
 	total := 0
+	var acceptedRecs []nell.Record
 
 	for {
 		var header [4]byte
@@ -202,18 +203,26 @@ func (s *Server) handleBinPush(w http.ResponseWriter, r *http.Request) {
 		ok, _, err := s.store.Put(rec)
 		if err == nil && ok {
 			accepted++
+			acceptedRecs = append(acceptedRecs, rec)
 		}
 		s.recordSeen(rec)
 	}
 
-	// Broadcast the newly accepted changes (in memory for now,
-	// ideally we'd broadcast the raw binary to other WebSocket peers too)
-	// s.broadcast(...) // TODO: optimize broadcast to be binary-native too
+	// Broadcast accepted changes to connected WebSocket peers, same as
+	// handlePush does.  The WebSocket frame is JSON-encoded; a future
+	// optimisation could send binary frames to binary-native peers.
+	if len(acceptedRecs) > 0 {
+		s.broadcast(acceptedRecs)
+	}
 
 	var resp [4]byte
 	binary.BigEndian.PutUint32(resp[:], uint32(accepted))
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(resp[:])
+
+	if s.metrics != nil {
+		s.metrics.RecordPush(r.Context(), accepted, total)
+	}
 }
 
 // requireJSON returns middleware that rejects requests without

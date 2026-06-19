@@ -2,6 +2,24 @@
 
 All notable changes for this project will be documented in this file.
 
+## [v0.2.5] - 2026-06-19
+
+### Fixed
+- **Binary push broadcast**: `handleBinPush` was accepting records via the binary sync endpoint but never broadcasting them to WebSocket peers. JSON push (`handlePush`) broadcast fine; binary push silently dropped the broadcast step. This meant peers connected via WebSocket wouldn't see changes until their next poll cycle. Fixed: `handleBinPush` now collects accepted records and calls `s.broadcast()` the same way `handlePush` does. Also added metrics recording to match the JSON path.
+
+### Added
+- **JS SDK expansion**: the WASM client (`client/main.go`) and JS SDK (`client/nell.js`) now expose the full SDK API surface:
+  - `putMany(docs[])` / `nellPutMany` — batch insert with rollback on error
+  - `getMany(ids[])` / `nellGetMany` — batch fetch, missing IDs silently skipped
+  - `changes(callback)` / `nellChanges` — real-time changes feed bridged from Go channel to JS callback, with `stopChanges(handle)` to cancel
+  - `startSync(url, interval, secret)` / `nellLiveSync` — continuous HTTP polling sync with configurable interval and HMAC auth, returns a handle for `stopSync()`
+  - `startSyncWS(url, secret)` / `nellLiveWS` — continuous WebSocket sync with auto-reconnect, returns a handle for `stopSync()`
+  - `stopSync(handle)` / `nellStopSync` — stops a running sync loop and fires `onDisconnect`
+  - `setAuth(secret)` / `nellSetAuth` — sets HMAC secret for all subsequent sync calls
+  - `destroy()` / `nellDestroy` — tombstones all documents
+- **Lifecycle hooks wired**: `onConnect` fires when `startSync`/`startSyncWS` establishes a connection; `onDisconnect` fires on `stopSync`. Previously these hooks were registered but never invoked.
+- **WASM test**: `TestWASMBulkOps` exercises `putMany`, `getMany`, `changes` feed, and `destroy` under Node with fake-indexeddb.
+
 ## [v0.2.4] - 2026-06-19
 
 ### Changed

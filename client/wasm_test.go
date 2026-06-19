@@ -27,6 +27,27 @@ func TestWASMCallbacks(t *testing.T) {
 	}
 }
 
+// TestWASMBulkOps verifies the putMany, getMany, changes, and destroy
+// callbacks added in the JS SDK expansion.
+func TestWASMBulkOps(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not in PATH; skipping WASM integration test")
+	}
+
+	root := repoRoot(t)
+	wasmPath := buildWASMClient(t, root)
+	scriptPath := writeNodeBulkHarness(t)
+	wasmExecPath := wasmExecPath(t)
+	fakeIDBPath := fakeIDBAutoPath(t, root)
+
+	cmd := exec.Command("node", scriptPath, wasmExecPath, wasmPath, fakeIDBPath)
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run WASM bulk harness:\n%s", out)
+	}
+}
+
 // TestWASMPersistentNodeID verifies that the WASM client's persistent
 // nodeID (and any data written to IndexedDBStore) survives a reload of the
 // Go runtime.  Loads the same WASM twice in the same Node process, with
@@ -57,6 +78,16 @@ func writeNodeHarness(t *testing.T) string {
 	scriptPath := filepath.Join(t.TempDir(), "wasm_client_harness.js")
 	if err := os.WriteFile(scriptPath, []byte(nodeHarness), 0o644); err != nil {
 		t.Fatalf("write Node harness: %v", err)
+	}
+	return scriptPath
+}
+
+func writeNodeBulkHarness(t *testing.T) string {
+	t.Helper()
+
+	scriptPath := filepath.Join(t.TempDir(), "wasm_bulk_harness.js")
+	if err := os.WriteFile(scriptPath, []byte(nodeBulkHarness), 0o644); err != nil {
+		t.Fatalf("write Node bulk harness: %v", err)
 	}
 	return scriptPath
 }
@@ -248,7 +279,124 @@ main().catch((err) => {
 });
 `
 
-// nodeReloadHarness loads the WASM twice in the same Node process and
+// nodeBulkHarness exercises putMany, getMany, changes feed, and destroy.
+const nodeBulkHarness = `
+const fs = require("fs");
+const path = require("path");
+const util = require("util");
+const crypto = require("crypto");
+const { performance } = require("perf_hooks");
+
+async function main() {
+  const [, , wasmExecPath, wasmPath, fakeIDBPath] = process.argv;
+  if (!wasmExecPath || !wasmPath) {
+    throw new Error("usage: node bulk_harness.js <wasm_exec.js> <binary.wasm> [fake-indexeddb-auto.js]");
+  }
+
+  globalThis.require = require;
+  globalThis.fs = fs;
+  globalThis.path = path;
+  globalThis.TextEncoder = util.TextEncoder;
+  globalThis.TextDecoder = util.TextDecoder;
+  globalThis.performance ??= performance;
+  globalThis.crypto ??= crypto.webcrypto ?? crypto;
+
+  if (fakeIDBPath) {
+    require(fakeIDBPath);
+  }
+
+  require(wasmExecPath);
+
+  const go = new Go();
+  go.argv = [wasmPath];
+  go.env = { TMPDIR: require("os").tmpdir() };
+  go.exit = (code) => {
+    if (code !== 0) {
+      throw new Error("Go runtime exited with code " + code);
+    }
+  };
+
+  const result = await WebAssembly.instantiate(fs.readFileSync(wasmPath), go.importObject);
+  const runPromise = go.run(result.instance);
+  runPromise.catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+
+  const deadline = Date.now() + 2000;
+  while (!globalThis.nellReady && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  if (!globalThis.nellReady) {
+    throw new Error("nellReady was never set");
+  }
+
+  // ── putMany ──
+  const putManyResp = JSON.parse(await globalThis.nellPutMany(JSON.stringify([
+    { _id: "bulk-1", title: "first" },
+    { _id: "bulk-2", title: "second" },
+    { _id: "bulk-3", title: "third" },
+  ])));
+  if (!putManyResp.ok || putManyResp.revs.length !== 3) {
+    throw new Error("putMany failed: " + JSON.stringify(putManyResp));
+  }
+
+  // ── getMany ──
+  const getManyResp = JSON.parse(await globalThis.nellGetMany(JSON.stringify(["bulk-1", "bulk-3", "nonexistent"])));
+  if (!getManyResp.ok) {
+    throw new Error("getMany failed: " + JSON.stringify(getManyResp));
+  }
+  const docs = getManyResp.docs;
+  if (Object.keys(docs).length !== 2) {
+    throw new Error("getMany should return 2 docs (nonexistent skipped), got " + Object.keys(docs).length);
+  }
+  if (docs["bulk-1"].title !== "first" || docs["bulk-3"].title !== "third") {
+    throw new Error("getMany returned wrong data: " + JSON.stringify(docs));
+  }
+
+  // ── changes feed ──
+  const changes = [];
+  const changeHandle = globalThis.nellChanges((data) => {
+    changes.push(JSON.parse(data));
+  });
+
+  // Write a doc to trigger a change event.
+  await globalThis.nellPut(JSON.stringify({ _id: "change-test", val: 1 }));
+
+  // Wait for the change to propagate.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  if (changes.length === 0) {
+    throw new Error("changes feed did not emit any events");
+  }
+  const lastChange = changes[changes.length - 1];
+  if (lastChange.id !== "change-test") {
+    throw new Error("changes feed emitted wrong id: " + lastChange.id);
+  }
+
+  globalThis.nellStopChanges(changeHandle);
+
+  // ── destroy ──
+  const destroyResp = JSON.parse(await globalThis.nellDestroy());
+  if (!destroyResp.ok) {
+    throw new Error("destroy failed: " + JSON.stringify(destroyResp));
+  }
+
+  // After destroy, allDocs should be empty (excluding meta records).
+  const listResp = JSON.parse(await globalThis.nellAllDocs("{}"));
+  const userRows = (listResp.result.rows || []).filter(r => !r.id.startsWith("meta:"));
+  if (userRows.length !== 0) {
+    throw new Error("destroy did not clear all docs: " + userRows.length + " remaining");
+  }
+
+  process.exit(0);
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
+`
 // asserts that the persistent nodeID and any data written in the first
 // session are still visible in the second.
 const nodeReloadHarness = `
